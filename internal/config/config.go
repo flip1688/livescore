@@ -1,7 +1,9 @@
-// Package config loads service configuration from environment variables.
+// Package config loads service configuration from environment variables,
+// seeded from a local .env file when one exists.
 package config
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"strconv"
@@ -52,6 +54,7 @@ type Config struct {
 }
 
 func Load() (*Config, error) {
+	loadDotEnv(".env")
 	cfg := &Config{
 		Port:           envInt("PORT", 8080),
 		MongoURI:       os.Getenv("MONGO_URI"),
@@ -111,6 +114,40 @@ func (cfg *Config) validateR2() error {
 		return fmt.Errorf("R2 config incomplete: set %v but missing %v (set all five R2_* vars or none)", set, missing)
 	}
 	return nil
+}
+
+// loadDotEnv seeds os environment variables from a KEY=VALUE file so every
+// binary works with a plain `.env` next to it — no `export` dance needed.
+// Real environment variables always win over file values; a missing file is
+// simply ignored. Lines starting with # and blank lines are skipped, and
+// optional surrounding quotes on values are stripped.
+func loadDotEnv(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
+			value = value[1 : len(value)-1]
+		}
+		if key == "" || os.Getenv(key) != "" {
+			continue
+		}
+		os.Setenv(key, value)
+	}
 }
 
 func envStr(key, def string) string {
