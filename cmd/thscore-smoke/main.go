@@ -1,0 +1,200 @@
+// Command thscore-smoke fires one real request per typed thscore endpoint and
+// validates the live payload against our structs: it reports envelope errors,
+// payload fields our structs don't know, struct fields the payload never sent,
+// and strict-decode (type) mismatches. Raw payloads are saved to -out for
+// inspection. One call per endpoint stays within every documented rate limit.
+//
+// Usage: THSCORE_BASE_URL=... THSCORE_API_KEY=... go run ./cmd/thscore-smoke -out /tmp/payloads
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/flip1688/livescore/internal/thscore"
+)
+
+var (
+	baseURL = os.Getenv("THSCORE_BASE_URL")
+	apiKey  = os.Getenv("THSCORE_API_KEY")
+	outDir  string
+	only    map[string]bool
+)
+
+func main() {
+	flag.StringVar(&outDir, "out", "smoke-out", "directory for raw payload dumps")
+	onlyFlag := flag.String("only", "", "comma-separated endpoint names to test (default: all); respect the per-endpoint rate limits when re-running")
+	flag.Parse()
+	if *onlyFlag != "" {
+		only = map[string]bool{}
+		for _, n := range strings.Split(*onlyFlag, ",") {
+			only[strings.TrimSpace(n)] = true
+		}
+	}
+	if baseURL == "" || apiKey == "" {
+		fmt.Fprintln(os.Stderr, "THSCORE_BASE_URL and THSCORE_API_KEY must be set")
+		os.Exit(2)
+	}
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	today := time.Now().In(time.FixedZone("GMT+7", 7*3600)).Format("2006-01-02")
+
+	run[thscore.LeagueProfile]("league", "/football_th/league.aspx", nil)
+	run[thscore.TeamProfile]("team", "/football_th/team.aspx", url.Values{"page": {"1"}})
+	run[thscore.Country]("country", "/football_th/country.aspx", nil)
+	run[thscore.LivescoreMatch]("schedule", "/football_th/schedule/basic.aspx", url.Values{"date": {today}})
+	run[thscore.ScheduleModification]("modify", "/football_th/schedule/modify.aspx", nil)
+	run[thscore.LivescoreMatch]("livescores", "/football_th/livescores.aspx", nil)
+	run[thscore.LivescoreChange]("changes", "/football_th/livescores/changes.aspx", nil)
+	run[thscore.EventsMatch]("events", "/football_th/events.aspx", url.Values{"cmd": {"new"}})
+	run[thscore.StatsMatch]("stats", "/football_th/stats.aspx", nil)
+}
+
+// run fetches one endpoint and prints a validation report for element type T.
+func run[T any](name, path string, params url.Values) {
+	if only != nil && !only[name] {
+		return
+	}
+	fmt.Printf("== %s (%s)\n", name, path)
+	body, err := get(path, params)
+	if err != nil {
+		fmt.Printf("   FETCH ERROR: %v\n", err)
+		return
+	}
+	if err := os.WriteFile(filepath.Join(outDir, name+".json"), body, 0o644); err != nil {
+		fmt.Printf("   write dump: %v\n", err)
+	}
+
+	var env struct {
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		fmt.Printf("   ENVELOPE DECODE ERROR: %v (body: %.120s)\n", err, body)
+		return
+	}
+	if env.Code != 0 {
+		fmt.Printf("   API ERROR: code=%d message=%q\n", env.Code, env.Message)
+		return
+	}
+	if len(env.Data) == 0 || string(env.Data) == "null" {
+		fmt.Println("   data: empty/null")
+		return
+	}
+
+	var elems []json.RawMessage
+	if err := json.Unmarshal(env.Data, &elems); err != nil {
+		fmt.Printf("   DATA NOT AN ARRAY: %v (data: %.120s)\n", err, env.Data)
+		return
+	}
+
+	known := jsonTags(reflect.TypeFor[T]())
+	seen := map[string]bool{}
+	strictErrs := map[string]int{}
+	for _, raw := range elems {
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &m); err != nil {
+			strictErrs["element not an object: "+err.Error()]++
+			continue
+		}
+		for k := range m {
+			seen[k] = true
+		}
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.DisallowUnknownFields()
+		var v T
+		if err := dec.Decode(&v); err != nil {
+			strictErrs[err.Error()]++
+		}
+	}
+
+	var extra, missing []string
+	for k := range seen {
+		if !known[k] {
+			extra = append(extra, k)
+		}
+	}
+	for k := range known {
+		if !seen[k] {
+			missing = append(missing, k)
+		}
+	}
+	sort.Strings(extra)
+	sort.Strings(missing)
+
+	fmt.Printf("   items: %d\n", len(elems))
+	if len(extra) > 0 {
+		fmt.Printf("   payload fields NOT in struct: %s\n", strings.Join(extra, ", "))
+	}
+	if len(missing) > 0 {
+		fmt.Printf("   struct fields never in payload: %s\n", strings.Join(missing, ", "))
+	}
+	if len(strictErrs) > 0 {
+		keys := make([]string, 0, len(strictErrs))
+		for k := range strictErrs {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for i, k := range keys {
+			if i == 8 {
+				fmt.Printf("   ... %d more distinct strict-decode errors\n", len(keys)-8)
+				break
+			}
+			fmt.Printf("   strict-decode (%dx): %s\n", strictErrs[k], k)
+		}
+	}
+	if len(extra) == 0 && len(strictErrs) == 0 {
+		fmt.Println("   OK: struct covers payload")
+	}
+}
+
+func get(path string, params url.Values) ([]byte, error) {
+	if params == nil {
+		params = url.Values{}
+	}
+	params.Set("api_key", apiKey)
+	u := baseURL + path + "?" + params.Encode()
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Get(u)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status %d: %.200s", resp.StatusCode, body)
+	}
+	time.Sleep(500 * time.Millisecond) // politeness gap between endpoints
+	return body, nil
+}
+
+// jsonTags returns the set of top-level json field names of a struct type.
+func jsonTags(t reflect.Type) map[string]bool {
+	out := map[string]bool{}
+	for i := 0; i < t.NumField(); i++ {
+		tag := t.Field(i).Tag.Get("json")
+		name, _, _ := strings.Cut(tag, ",")
+		if name != "" && name != "-" {
+			out[name] = true
+		}
+	}
+	return out
+}
