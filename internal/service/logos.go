@@ -74,7 +74,7 @@ func NewLogoMirror(store storage.ObjectStore, dnsServer string, log *slog.Logger
 // so a daily re-sync is idempotent (unchanged source → same key, no
 // re-download) while a changed source URL naturally lands on a new key.
 func (l *LogoMirror) MirrorURL(ctx context.Context, kind, id, sourceURL string) (string, error) {
-	if sourceURL == "" {
+	if !usableLogoSource(sourceURL) {
 		return "", nil
 	}
 
@@ -136,10 +136,27 @@ func (l *LogoMirror) objectKey(kind, id, sourceURL string) string {
 // A stored logo_url that differs — empty, source changed, or public base URL
 // changed — means the doc needs (re-)mirroring.
 func (l *LogoMirror) ExpectedURL(kind, id, sourceURL string) string {
-	if sourceURL == "" {
+	if !usableLogoSource(sourceURL) {
 		return ""
 	}
 	return l.store.PublicURL(l.objectKey(kind, id, sourceURL))
+}
+
+// usableLogoSource reports whether sourceURL actually names an image file.
+// thscore sometimes emits placeholder URLs with an empty filename
+// (".../images/?win007=sell") for entries that have no logo — those 403
+// forever, so they are treated the same as an empty source. Keeping
+// MirrorURL and ExpectedURL consistent here matters: both must agree that a
+// junk source means "no logo", or the doc would stay pending on every run.
+func usableLogoSource(sourceURL string) bool {
+	if sourceURL == "" {
+		return false
+	}
+	u, err := url.Parse(sourceURL)
+	if err != nil {
+		return false
+	}
+	return u.Path != "" && !strings.HasSuffix(u.Path, "/")
 }
 
 // MirrorAll mirrors every id→sourceURL pair concurrently (bounded pool) and

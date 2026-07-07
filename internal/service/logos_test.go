@@ -207,16 +207,26 @@ func TestExpectedURL_MatchesMirrorURL(t *testing.T) {
 	}
 }
 
-func TestMirrorURL_EmptySource(t *testing.T) {
+func TestMirrorURL_UnusableSource(t *testing.T) {
 	store := newFakeStore()
 	lm := NewLogoMirror(store, "", discardLogger())
 
-	url, err := lm.MirrorURL(context.Background(), "teams", "1", "")
-	if err != nil {
-		t.Fatalf("MirrorURL: %v", err)
-	}
-	if url != "" {
-		t.Errorf("url = %s, want empty", url)
+	for _, src := range []string{
+		"", // no logo at all
+		"http://zq.titan007.com/Image/league_match/images/?win007=sell", // thscore placeholder: empty filename
+		"http://zq.titan007.com/Image/team/images/",
+	} {
+		url, err := lm.MirrorURL(context.Background(), "teams", "1", src)
+		if err != nil {
+			t.Fatalf("MirrorURL(%q): %v", src, err)
+		}
+		if url != "" {
+			t.Errorf("MirrorURL(%q) = %s, want empty", src, url)
+		}
+		// ExpectedURL must agree, or the doc would stay pending forever.
+		if exp := lm.ExpectedURL("teams", "1", src); exp != "" {
+			t.Errorf("ExpectedURL(%q) = %s, want empty", src, exp)
+		}
 	}
 	if len(store.objs) != 0 {
 		t.Errorf("stored objects = %d, want 0", len(store.objs))
