@@ -11,6 +11,7 @@
 package thscore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -144,6 +145,24 @@ type envelope[T any] struct {
 	Data    T      `json:"data"`
 }
 
+// APIError is a thscore-level failure: HTTP 200 with a non-zero envelope
+// code. Callers can inspect Code to tell benign conditions apart from real
+// failures — e.g. CodeNoData (cup/friendly leagues have no standings table)
+// vs. rate limiting.
+type APIError struct {
+	Path    string
+	Code    int
+	Message string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("thscore: %s: api error (code %d): %s", e.Path, e.Code, e.Message)
+}
+
+// CodeNoData: the endpoint has nothing for the requested id ("No Data.") —
+// expected for e.g. standings of knockout-only competitions.
+const CodeNoData = 1
+
 // fetch performs a rate-limited GET against path and decodes the envelope's
 // data field into T. A non-zero envelope code is an error — thscore returns
 // HTTP 200 with code != 0 on rate limit, so this is the only reliable
@@ -155,13 +174,30 @@ func fetch[T any](ctx context.Context, c *Client, path string, params url.Values
 		return zero, err
 	}
 	var env envelope[T]
-	if err := json.Unmarshal(body, &env); err != nil {
-		return zero, fmt.Errorf("thscore: %s: decode: %w", path, err)
+	if err := unmarshalLenient(body, &env, path); err != nil {
+		return zero, err
 	}
 	if env.Code != 0 {
-		return zero, fmt.Errorf("thscore: %s: api error (code %d): %s", path, env.Code, env.Message)
+		return zero, &APIError{Path: path, Code: env.Code, Message: env.Message}
 	}
 	return env.Data, nil
+}
+
+// unmarshalLenient decodes a thscore body, retrying once with
+// RepairInvalidEscapes when the raw payload has a JSON syntax error (thscore
+// ships illegal string escapes like `Women\s` on some endpoints). The
+// original error is reported if the repaired payload still doesn't parse.
+func unmarshalLenient(body []byte, v any, path string) error {
+	err := json.Unmarshal(body, v)
+	if err == nil {
+		return nil
+	}
+	if repaired := RepairInvalidEscapes(body); !bytes.Equal(repaired, body) {
+		if json.Unmarshal(repaired, v) == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("thscore: %s: decode: %w", path, err)
 }
 
 // --- Dictionary ---
@@ -260,11 +296,11 @@ func (c *Client) FetchLeagueStanding(ctx context.Context, leagueID string) (Stan
 		Message string `json:"message"`
 	}
 	if err := json.Unmarshal(body, &probe); err == nil && probe.Code != 0 {
-		return StandingResponse{}, fmt.Errorf("thscore: %s: api error (code %d): %s", pathStanding, probe.Code, probe.Message)
+		return StandingResponse{}, &APIError{Path: pathStanding, Code: probe.Code, Message: probe.Message}
 	}
 	var out StandingResponse
-	if err := json.Unmarshal(body, &out); err != nil {
-		return StandingResponse{}, fmt.Errorf("thscore: %s: decode: %w", pathStanding, err)
+	if err := unmarshalLenient(body, &out, pathStanding); err != nil {
+		return StandingResponse{}, err
 	}
 	return out, nil
 }

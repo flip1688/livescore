@@ -74,3 +74,21 @@ func TestParseTimeAny(t *testing.T) {
 		})
 	}
 }
+
+func TestRepairInvalidEscapes(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		// real analysis.aspx fragment (match 2970031, 2026-07-10)
+		{"illegal apostrophe escape", `{"a":"Volsungur  Husavik  Women\s,14307"}`, `{"a":"Volsungur  Husavik  Womens,14307"}`},
+		{"legal escapes untouched", `{"a":"line\nbreak \"q\" \\ \/ ไ"}`, `{"a":"line\nbreak \"q\" \\ \/ ไ"}`},
+		{"illegal escape in key", `{"a\s":1}`, `{"as":1}`},
+		{"well-formed passes through", `{"data":{"x":[1,2,3]}}`, `{"data":{"x":[1,2,3]}}`},
+		{"trailing backslash dropped", `{"a":"x\`, `{"a":"x`},
+	}
+	for _, c := range cases {
+		if got := string(RepairInvalidEscapes([]byte(c.in))); got != c.want {
+			t.Errorf("%s: got %q want %q", c.name, got, c.want)
+		}
+	}
+}

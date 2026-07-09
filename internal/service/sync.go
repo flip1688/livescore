@@ -524,14 +524,28 @@ func (s *Syncer) syncStandings(ctx context.Context) error {
 		return err
 	}
 	now := time.Now().UTC()
-	synced := 0
+	synced, noData, failed := 0, 0, 0
 	for _, leagueID := range leagueIDs {
 		if leagueID == "" {
 			continue
 		}
+		if s.noDataMarked(ctx, "standings:nodata:"+leagueID) {
+			noData++
+			continue
+		}
 		resp, err := s.ts.FetchLeagueStanding(ctx, leagueID)
 		if err != nil {
+			var apiErr *thscore.APIError
+			if errors.As(err, &apiErr) && apiErr.Code == thscore.CodeNoData {
+				// Knockout-only competitions and friendlies have no table —
+				// expected, not a failure. Remember it so recurring runs skip
+				// the call instead of burning a rate-limiter slot re-asking.
+				noData++
+				s.markNoData(ctx, "standings:nodata:"+leagueID, standingsNoDataTTL)
+				continue
+			}
 			s.log.Warn("sync standing failed", "league_id", leagueID, "err", err)
+			failed++
 			continue
 		}
 		st := standingFromResponse(resp, now)
@@ -547,8 +561,32 @@ func (s *Syncer) syncStandings(ctx context.Context) error {
 		}
 		synced++
 	}
-	s.log.Info("standings synced", "leagues", len(leagueIDs), "synced", synced)
+	s.log.Info("standings synced", "leagues", len(leagueIDs), "synced", synced, "no_data", noData, "failed", failed)
 	return nil
+}
+
+// No-data markers: thscore answers code 1 ("No Data.") for ids that simply
+// have nothing — remember that in Redis so recurring sync runs skip the call.
+// Markers are cache-only: a Redis flush just means re-checking once.
+//
+// Standings: a competition without a table won't grow one mid-season → 24h.
+// Analysis: thscore may generate analysis closer to kickoff and the whole
+// prefetch window is only 24h → retry sooner (6h).
+const (
+	standingsNoDataTTL = 24 * time.Hour
+	analysisNoDataTTL  = 6 * time.Hour
+)
+
+func (s *Syncer) noDataMarked(ctx context.Context, key string) bool {
+	var marked bool
+	err := s.cache.GetJSON(ctx, key, &marked)
+	return err == nil && marked
+}
+
+func (s *Syncer) markNoData(ctx context.Context, key string, ttl time.Duration) {
+	if err := s.cache.SetJSON(ctx, key, true, ttl); err != nil {
+		s.log.Warn("mark no-data", "key", key, "err", err)
+	}
 }
 
 // analysisLookahead is how far ahead of now the analysis sync job looks for
@@ -604,14 +642,26 @@ func (s *Syncer) syncAnalysis(ctx context.Context) error {
 		return err
 	}
 
-	skipped, fetched := 0, 0
+	skipped, fetched, noData := 0, 0, 0
 	for _, m := range candidates {
 		if analysisSkip(now, fetchedAt[m.ID]) {
 			skipped++
 			continue
 		}
+		if s.noDataMarked(ctx, "analysis:nodata:"+m.ID) {
+			noData++
+			continue
+		}
 		raw, err := s.ts.FetchAnalysis(ctx, m.ID)
 		if err != nil {
+			var apiErr *thscore.APIError
+			if errors.As(err, &apiErr) && apiErr.Code == thscore.CodeNoData {
+				// No analysis for this match (yet) — expected for obscure
+				// fixtures; retried after analysisNoDataTTL, not every run.
+				noData++
+				s.markNoData(ctx, "analysis:nodata:"+m.ID, analysisNoDataTTL)
+				continue
+			}
 			s.log.Warn("fetch analysis failed", "match_id", m.ID, "err", err)
 			continue
 		}
@@ -625,7 +675,7 @@ func (s *Syncer) syncAnalysis(ctx context.Context) error {
 		}
 		fetched++
 	}
-	s.log.Info("analysis synced", "selected", len(candidates), "skipped", skipped, "fetched", fetched)
+	s.log.Info("analysis synced", "selected", len(candidates), "skipped", skipped, "fetched", fetched, "no_data", noData)
 	return nil
 }
 
