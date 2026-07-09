@@ -578,7 +578,7 @@ func (s *Syncer) syncStandings(ctx context.Context) error {
 		return err
 	}
 	now := time.Now().UTC()
-	synced, noData, failed := 0, 0, 0
+	synced, cups, noData, failed := 0, 0, 0, 0
 	for _, leagueID := range leagueIDs {
 		if leagueID == "" {
 			continue
@@ -587,25 +587,44 @@ func (s *Syncer) syncStandings(ctx context.Context) error {
 			noData++
 			continue
 		}
+
+		var st model.LeagueStanding
+		isCup := false
 		resp, err := s.ts.FetchLeagueStanding(ctx, leagueID)
 		if err != nil {
 			var apiErr *thscore.APIError
-			if errors.As(err, &apiErr) && apiErr.Code == thscore.CodeNoData {
-				// Knockout-only competitions and friendlies have no table —
-				// expected, not a failure. Remember it so recurring runs skip
-				// the call instead of burning a rate-limiter slot re-asking.
-				noData++
-				s.markNoData(ctx, "standings:nodata:"+leagueID, standingsNoDataTTL)
+			if !errors.As(err, &apiErr) || apiErr.Code != thscore.CodeNoData {
+				s.log.Warn("sync standing failed", "league_id", leagueID, "err", err)
+				failed++
 				continue
 			}
-			s.log.Warn("sync standing failed", "league_id", leagueID, "err", err)
-			failed++
-			continue
+			// standing/league.aspx has no table for this id — cup/group-stage
+			// competitions (e.g. World Cup) are only served from
+			// standing/cup.aspx, so try that before giving up and caching
+			// no-data. Genuine knockout-only/friendly competitions have no
+			// table on either endpoint and fall through to the no-data cache
+			// below.
+			cupResp, cupErr := s.ts.FetchCupStanding(ctx, leagueID)
+			if cupErr != nil {
+				var cupAPIErr *thscore.APIError
+				if errors.As(cupErr, &cupAPIErr) && cupAPIErr.Code == thscore.CodeNoData {
+					noData++
+					s.markNoData(ctx, "standings:nodata:"+leagueID, standingsNoDataTTL)
+					continue
+				}
+				s.log.Warn("sync cup standing failed", "league_id", leagueID, "err", cupErr)
+				failed++
+				continue
+			}
+			st = cupStandingFromResponse(leagueID, cupResp, now)
+			isCup = true
+		} else {
+			st = standingFromResponse(resp, now)
+			if st.ID == "" {
+				st.ID = leagueID // keep our key stable if upstream ever omits leagueInfo.leagueId
+			}
 		}
-		st := standingFromResponse(resp, now)
-		if st.ID == "" {
-			st.ID = leagueID // keep our key stable if upstream ever omits leagueInfo.leagueId
-		}
+
 		if err := s.store.UpsertStanding(ctx, st); err != nil {
 			s.log.Warn("upsert standing failed", "league_id", leagueID, "err", err)
 			continue
@@ -614,8 +633,11 @@ func (s *Syncer) syncStandings(ctx context.Context) error {
 			s.log.Warn("evict standings cache", "league_id", leagueID, "err", err)
 		}
 		synced++
+		if isCup {
+			cups++
+		}
 	}
-	s.log.Info("standings synced", "leagues", len(leagueIDs), "synced", synced, "no_data", noData, "failed", failed)
+	s.log.Info("standings synced", "leagues", len(leagueIDs), "synced", synced, "cups", cups, "no_data", noData, "failed", failed)
 	return nil
 }
 

@@ -124,6 +124,168 @@ func mustParseFixture(t *testing.T) thscore.StandingResponse {
 	return r
 }
 
+// cupStandingFixtureJSON is a trimmed excerpt of a real /football_th/
+// standing/cup.aspx payload (World Cup 2026, leagueId 75), captured via
+// cmd/thscore-smoke on 2026-07-10: the single "รอบแบ่งกลุ่ม" (group stage)
+// round, kept down to its first two groups (of 12) with all four rows each.
+// Team names arrive already in Thai, and "color" is a literal hex string
+// (or "" for no zone) rather than an index into a side table — unlike
+// standing/league.aspx's StandingRow.Color.
+const cupStandingFixtureJSON = `{
+  "leagueId": 75,
+  "season": "2026",
+  "roundScoreItems": [
+    {
+      "roundName": "รอบแบ่งกลุ่ม",
+      "groupScoreItems": [
+        {
+          "groupName": "Group A",
+          "scoreItems": [
+            {"rank": 1, "teamId": "819", "teamName": "เม็กซิโก", "color": "#ff0000",
+             "totalCount": 3, "winCount": 3, "drawCount": 0, "loseCount": 0,
+             "getScore": 6, "loseScore": 0, "goalDifference": 6, "integral": 9,
+             "deduction": "", "deductionExplain": ""},
+            {"rank": 2, "teamId": "803", "teamName": "แอฟริกาใต้", "color": "#ff0000",
+             "totalCount": 3, "winCount": 1, "drawCount": 1, "loseCount": 1,
+             "getScore": 2, "loseScore": 3, "goalDifference": -1, "integral": 4,
+             "deduction": "", "deductionExplain": ""},
+            {"rank": 3, "teamId": "898", "teamName": "เกาหลีใต้", "color": "",
+             "totalCount": 3, "winCount": 1, "drawCount": 0, "loseCount": 2,
+             "getScore": 2, "loseScore": 3, "goalDifference": -1, "integral": 3,
+             "deduction": "", "deductionExplain": ""},
+            {"rank": 4, "teamId": "747", "teamName": "สาธารณรัฐเช็ก", "color": "",
+             "totalCount": 3, "winCount": 0, "drawCount": 1, "loseCount": 2,
+             "getScore": 2, "loseScore": 6, "goalDifference": -4, "integral": 1,
+             "deduction": "", "deductionExplain": ""}
+          ]
+        },
+        {
+          "groupName": "Group B",
+          "scoreItems": [
+            {"rank": 1, "teamId": "648", "teamName": "สวิตเซอร์แลนด์", "color": "#ff0000",
+             "totalCount": 3, "winCount": 2, "drawCount": 1, "loseCount": 0,
+             "getScore": 7, "loseScore": 3, "goalDifference": 4, "integral": 7,
+             "deduction": "", "deductionExplain": ""},
+            {"rank": 2, "teamId": "795", "teamName": "แคนาดา", "color": "#ff0000",
+             "totalCount": 3, "winCount": 1, "drawCount": 1, "loseCount": 1,
+             "getScore": 8, "loseScore": 3, "goalDifference": 5, "integral": 4,
+             "deduction": "", "deductionExplain": ""},
+            {"rank": 3, "teamId": "782", "teamName": "บอสเนียและเฮอร์เซโกวีนา", "color": "#ff0000",
+             "totalCount": 3, "winCount": 1, "drawCount": 1, "loseCount": 1,
+             "getScore": 5, "loseScore": 6, "goalDifference": -1, "integral": 4,
+             "deduction": "", "deductionExplain": ""},
+            {"rank": 4, "teamId": "904", "teamName": "กาตาร์", "color": "",
+             "totalCount": 3, "winCount": 0, "drawCount": 1, "loseCount": 2,
+             "getScore": 2, "loseScore": 10, "goalDifference": -8, "integral": 1,
+             "deduction": "", "deductionExplain": ""}
+          ]
+        }
+      ]
+    }
+  ]
+}`
+
+func mustParseCupFixture(t *testing.T) thscore.CupStandingResponse {
+	t.Helper()
+	var r thscore.CupStandingResponse
+	if err := json.Unmarshal([]byte(cupStandingFixtureJSON), &r); err != nil {
+		t.Fatalf("parse cup fixture: %v", err)
+	}
+	return r
+}
+
+// TestCupStandingFromResponse checks the header (Format/ID/CurrentSeason),
+// round/group nesting, and per-row field mapping, table-driven over a
+// representative sample of rows across both fixture groups.
+func TestCupStandingFromResponse(t *testing.T) {
+	r := mustParseCupFixture(t)
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	st := cupStandingFromResponse("75", r, now)
+
+	if st.ID != "75" {
+		t.Errorf("ID = %q, want 75", st.ID)
+	}
+	if st.Format != "cup" {
+		t.Errorf("Format = %q, want cup", st.Format)
+	}
+	if st.CurrentSeason != "2026" {
+		t.Errorf("CurrentSeason = %q, want 2026", st.CurrentSeason)
+	}
+	if !st.UpdatedAt.Equal(now) {
+		t.Errorf("UpdatedAt = %v, want %v", st.UpdatedAt, now)
+	}
+	if len(st.Standings.Total) != 0 {
+		t.Errorf("Standings.Total should stay empty for a cup doc, got %+v", st.Standings.Total)
+	}
+
+	if len(st.CupRounds) != 1 {
+		t.Fatalf("CupRounds len = %d, want 1", len(st.CupRounds))
+	}
+	round := st.CupRounds[0]
+	if round.RoundName != "รอบแบ่งกลุ่ม" {
+		t.Errorf("RoundName = %q, want รอบแบ่งกลุ่ม", round.RoundName)
+	}
+	if len(round.Groups) != 2 {
+		t.Fatalf("Groups len = %d, want 2", len(round.Groups))
+	}
+	if round.Groups[0].GroupName != "Group A" || round.Groups[1].GroupName != "Group B" {
+		t.Errorf("group names = %q, %q", round.Groups[0].GroupName, round.Groups[1].GroupName)
+	}
+
+	cases := []struct {
+		name         string
+		group, row   int
+		wantTeamID   string
+		wantTeamName string
+		wantColorHex string
+		wantPlayed   int
+		wantWin      int
+		wantDraw     int
+		wantLose     int
+		wantGoalsFor int
+		wantGoalsAgn int
+		wantGoalDiff int
+		wantPoints   int
+	}{
+		{"group A rank 1", 0, 0, "819", "เม็กซิโก", "#ff0000", 3, 3, 0, 0, 6, 0, 6, 9},
+		{"group A rank 3 (no color zone)", 0, 2, "898", "เกาหลีใต้", "", 3, 1, 0, 2, 2, 3, -1, 3},
+		{"group B rank 4", 1, 3, "904", "กาตาร์", "", 3, 0, 1, 2, 2, 10, -8, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			row := st.CupRounds[0].Groups[c.group].Rows[c.row]
+			if row.TeamID != c.wantTeamID || row.TeamName != c.wantTeamName {
+				t.Errorf("TeamID/TeamName = %q/%q, want %q/%q", row.TeamID, row.TeamName, c.wantTeamID, c.wantTeamName)
+			}
+			if row.ColorHex != c.wantColorHex {
+				t.Errorf("ColorHex = %q, want %q", row.ColorHex, c.wantColorHex)
+			}
+			if row.Played != c.wantPlayed || row.Win != c.wantWin || row.Draw != c.wantDraw || row.Lose != c.wantLose {
+				t.Errorf("Played/Win/Draw/Lose = %d/%d/%d/%d, want %d/%d/%d/%d",
+					row.Played, row.Win, row.Draw, row.Lose, c.wantPlayed, c.wantWin, c.wantDraw, c.wantLose)
+			}
+			if row.GoalsFor != c.wantGoalsFor || row.GoalsAgainst != c.wantGoalsAgn || row.GoalDifference != c.wantGoalDiff {
+				t.Errorf("GoalsFor/GoalsAgainst/GoalDifference = %d/%d/%d, want %d/%d/%d",
+					row.GoalsFor, row.GoalsAgainst, row.GoalDifference, c.wantGoalsFor, c.wantGoalsAgn, c.wantGoalDiff)
+			}
+			if row.Points != c.wantPoints {
+				t.Errorf("Points = %d, want %d", row.Points, c.wantPoints)
+			}
+		})
+	}
+}
+
+// TestCupStandingFromResponse_LeagueIDFallback checks that an empty
+// caller-supplied leagueID falls back to the payload's own leagueId, mirroring
+// standingFromResponse's fallback behavior for a missing/absent id.
+func TestCupStandingFromResponse_LeagueIDFallback(t *testing.T) {
+	r := mustParseCupFixture(t)
+	st := cupStandingFromResponse("", r, time.Now())
+	if st.ID != "75" {
+		t.Errorf("ID = %q, want 75 (from payload leagueId)", st.ID)
+	}
+}
+
 // TestStandingFromResponse_LeagueHeader checks the league/subleague header
 // mapping, including sourcing total/current round from the active
 // subLeagueInfos entry rather than leagueInfo itself (which doesn't carry

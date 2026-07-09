@@ -54,13 +54,52 @@ type StandingSubLeague struct {
 	CurrentSubLeague bool   `bson:"current_sub_league" json:"current_sub_league"`
 }
 
-// LeagueStanding is the league table synced from thscore's
-// standing/league.aspx, refreshed every 6h by the sync worker (scoped to
-// leagues with a fixture around today — see Syncer.syncStandings). _id is
-// the thscore league id.
+// CupRow is one team's row within a cup group-stage table, from thscore's
+// standing/cup.aspx. Unlike StandingRow (standing/league.aspx), thscore
+// already sends the team name and a resolved hex color per row — there's no
+// separate color-zone index to look up.
+type CupRow struct {
+	Rank           int    `bson:"rank" json:"rank"`
+	TeamID         string `bson:"team_id" json:"team_id"`
+	TeamName       string `bson:"team_name" json:"team_name"`
+	ColorHex       string `bson:"color_hex,omitempty" json:"color_hex,omitempty"`
+	Played         int    `bson:"played" json:"played"`
+	Win            int    `bson:"win" json:"win"`
+	Draw           int    `bson:"draw" json:"draw"`
+	Lose           int    `bson:"lose" json:"lose"`
+	GoalsFor       int    `bson:"goals_for" json:"goals_for"`
+	GoalsAgainst   int    `bson:"goals_against" json:"goals_against"`
+	GoalDifference int    `bson:"goal_difference" json:"goal_difference"`
+	Points         int    `bson:"points" json:"points"`
+}
+
+// CupGroup is one group (e.g. "Group A") within a cup round.
+type CupGroup struct {
+	GroupName string   `bson:"group_name" json:"group_name"`
+	Rows      []CupRow `bson:"rows" json:"rows"`
+}
+
+// CupRound is one round of a cup competition (e.g. group stage vs. knockout
+// rounds); RoundName arrives from thscore already in Thai.
+type CupRound struct {
+	RoundName string     `bson:"round_name" json:"round_name"`
+	Groups    []CupGroup `bson:"groups" json:"groups"`
+}
+
+// LeagueStanding is the standings table synced from thscore, refreshed every
+// 6h by the sync worker (scoped to leagues with a fixture around today — see
+// Syncer.syncStandings). _id is the thscore league id.
+//
+// Format distinguishes the two shapes thscore serves under two different
+// endpoints depending on the competition: "league" (standing/league.aspx —
+// Standings/SubLeagues/TotalRound/CurrentRound populated) or "cup"
+// (standing/cup.aspx — CupRounds populated instead, for group-stage
+// competitions like the World Cup). Only one of the two field groups is
+// populated per document; API readers should switch on Format.
 type LeagueStanding struct {
 	ID            string              `bson:"_id" json:"id"`
 	Name          string              `bson:"name" json:"name"`
+	Format        string              `bson:"format" json:"format"` // "league" or "cup"
 	CurrentSeason string              `bson:"current_season,omitempty" json:"current_season,omitempty"`
 	Color         string              `bson:"color,omitempty" json:"color,omitempty"`
 	ShortName     string              `bson:"short_name,omitempty" json:"short_name,omitempty"`
@@ -68,5 +107,6 @@ type LeagueStanding struct {
 	CurrentRound  int                 `bson:"current_round,omitempty" json:"current_round,omitempty"`
 	SubLeagues    []StandingSubLeague `bson:"sub_leagues,omitempty" json:"sub_leagues,omitempty"`
 	Standings     StandingViews       `bson:"standings" json:"standings"`
+	CupRounds     []CupRound          `bson:"cup_rounds,omitempty" json:"cup_rounds,omitempty"`
 	UpdatedAt     time.Time           `bson:"updated_at" json:"updated_at"`
 }

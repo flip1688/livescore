@@ -305,3 +305,53 @@ type StandingResponse struct {
 	LeagueColorInfos  []StandingColorInfo     `json:"leagueColorInfos"`
 	Conference        bool                    `json:"conference"`
 }
+
+// CupScoreItem is one team's row within a group-stage table, from
+// /football_th/standing/cup.aspx (confirmed live, league 75 / World Cup
+// 2026, 2026-07-10). Unlike StandingRow (standing/league.aspx), thscore
+// already sends Thai team names and a literal "#rrggbb" color string here
+// (or "" for no zone) rather than an index into a separate color table.
+// Deduction arrives as an empty string in every observed row (unlike
+// StandingRow's int Deduction on standing/league.aspx) — FlexString absorbs
+// both that and a numeric value if thscore ever sends one for a real
+// point deduction.
+type CupScoreItem struct {
+	Rank             int        `json:"rank"`
+	TeamID           FlexString `json:"teamId"`
+	TeamName         string     `json:"teamName"`
+	Color            string     `json:"color"`
+	TotalCount       int        `json:"totalCount"`
+	WinCount         int        `json:"winCount"`
+	DrawCount        int        `json:"drawCount"`
+	LoseCount        int        `json:"loseCount"`
+	GetScore         int        `json:"getScore"`
+	LoseScore        int        `json:"loseScore"`
+	GoalDifference   int        `json:"goalDifference"`
+	Integral         int        `json:"integral"` // points
+	Deduction        FlexString `json:"deduction"`
+	DeductionExplain string     `json:"deductionExplain"`
+}
+
+// CupGroupItem is one group (e.g. "Group A") within a cup round.
+type CupGroupItem struct {
+	GroupName  string         `json:"groupName"`
+	ScoreItems []CupScoreItem `json:"scoreItems"`
+}
+
+// CupRoundItem is one round of a cup competition (e.g. "รอบแบ่งกลุ่ม" — group
+// stage); thscore names are already Thai, no translation needed.
+type CupRoundItem struct {
+	RoundName       string         `json:"roundName"`
+	GroupScoreItems []CupGroupItem `json:"groupScoreItems"`
+}
+
+// CupStandingResponse is one element of the /football_th/standing/cup.aspx
+// payload's "data" array. Unlike standing/league.aspx, this endpoint uses the
+// standard {"code","message","data"} envelope, but "data" is an array with a
+// single element (confirmed live, league 75, 2026-07-10) — see
+// Client.FetchCupStanding, which unwraps it.
+type CupStandingResponse struct {
+	LeagueID        FlexString     `json:"leagueId"`
+	Season          string         `json:"season"`
+	RoundScoreItems []CupRoundItem `json:"roundScoreItems"`
+}

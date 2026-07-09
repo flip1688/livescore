@@ -75,9 +75,11 @@ func New(baseURL, apiKey string) *Client {
 			pathEvents:      every(1 * time.Minute),
 			pathStats:       every(1 * time.Minute), // hard 10s (recommended)
 			// no Fetch* methods yet — limiters reserved for when we add them
-			pathCorner:      every(1 * time.Minute),
-			pathLineups:     every(1 * time.Minute),
-			pathStandingCup: every(1 * time.Minute),
+			pathCorner:  every(1 * time.Minute),
+			pathLineups: every(1 * time.Minute),
+			// cup.aspx rate limit is undocumented — assume the same family as
+			// standing/league.aspx (hard 5s) until proven otherwise.
+			pathStandingCup: every(6 * time.Second),
 		},
 	}
 }
@@ -303,6 +305,25 @@ func (c *Client) FetchLeagueStanding(ctx context.Context, leagueID string) (Stan
 		return StandingResponse{}, err
 	}
 	return out, nil
+}
+
+// FetchCupStanding pulls a cup competition's group-stage tables (e.g. World
+// Cup) from /football_th/standing/cup.aspx. Unlike FetchLeagueStanding, this
+// endpoint uses the standard {"code","message","data"} envelope, so the
+// shared fetch[T] helper applies — but "data" is an array holding a single
+// element (confirmed live, league 75, 2026-07-10), not the object itself. An
+// empty array (a league/id with no cup table) is normalized to the same
+// CodeNoData signal FetchLeagueStanding's callers already handle, so
+// syncStandings can try both endpoints with one error-handling path.
+func (c *Client) FetchCupStanding(ctx context.Context, leagueID string) (CupStandingResponse, error) {
+	items, err := fetch[[]CupStandingResponse](ctx, c, pathStandingCup, url.Values{"leagueId": {leagueID}})
+	if err != nil {
+		return CupStandingResponse{}, err
+	}
+	if len(items) == 0 {
+		return CupStandingResponse{}, &APIError{Path: pathStandingCup, Code: CodeNoData, Message: "No Data."}
+	}
+	return items[0], nil
 }
 
 // FetchAnalysis pulls H2H/form/goal-distribution/odds stats for one match

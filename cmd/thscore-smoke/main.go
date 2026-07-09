@@ -27,10 +27,11 @@ import (
 )
 
 var (
-	baseURL string
-	apiKey  string
-	outDir  string
-	only    map[string]bool
+	baseURL     string
+	apiKey      string
+	outDir      string
+	only        map[string]bool
+	cupLeagueID string
 )
 
 func main() {
@@ -39,6 +40,7 @@ func main() {
 	apiKey = os.Getenv("THSCORE_API_KEY")
 
 	flag.StringVar(&outDir, "out", "smoke-out", "directory for raw payload dumps")
+	flag.StringVar(&cupLeagueID, "cupLeagueId", "75", "leagueId for the cup-standing case (default: 75, World Cup 2026)")
 	onlyFlag := flag.String("only", "", "comma-separated endpoint names to test (default: all); respect the per-endpoint rate limits when re-running")
 	flag.Parse()
 	if *onlyFlag != "" {
@@ -77,6 +79,18 @@ func main() {
 		} else {
 			runObj[thscore.StandingResponse]("standing", "/football_th/standing/league.aspx", url.Values{"leagueId": {leagueID}})
 		}
+	}
+
+	// standing/cup.aspx is keyed by leagueId too (assumed same 5s hard limit
+	// as standing/league.aspx — undocumented). Unlike standing/league.aspx,
+	// it uses the standard {"code","message","data"} envelope with "data" an
+	// array holding one element, so it fits the generic `run` array-of-T
+	// validator directly. Group-stage cup competitions (e.g. the World Cup)
+	// aren't reliably discoverable from today's schedule, so the league id
+	// is a flag defaulting to 75 (World Cup 2026, confirmed to have live
+	// group-stage data 2026-07-09).
+	if only == nil || only["cup-standing"] {
+		run[thscore.CupStandingResponse]("cup-standing", "/football_th/standing/cup.aspx", url.Values{"leagueId": {cupLeagueID}})
 	}
 
 	// analysis.aspx is keyed by matchId (hard limit 1s/call, recommended 6h/

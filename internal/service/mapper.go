@@ -149,6 +149,7 @@ func standingFromResponse(r thscore.StandingResponse, now time.Time) model.Leagu
 	return model.LeagueStanding{
 		ID:            string(r.LeagueInfo.LeagueID),
 		Name:          r.LeagueInfo.Name,
+		Format:        "league",
 		CurrentSeason: r.LeagueInfo.CurrentSeason,
 		Color:         r.LeagueInfo.Color,
 		ShortName:     r.LeagueInfo.ShortName,
@@ -164,6 +165,53 @@ func standingFromResponse(r thscore.StandingResponse, now time.Time) model.Leagu
 			AwayHalf: standingRows(r.AwayHalfStandings, r.LeagueColorInfos),
 		},
 		UpdatedAt: now,
+	}
+}
+
+// cupStandingFromResponse maps a thscore standing/cup.aspx payload (group-
+// stage cup competitions, e.g. the World Cup) into our domain LeagueStanding.
+// leagueID comes from the caller (the id syncStandings is iterating), not the
+// payload's own leagueId field, mirroring standingFromResponse's fallback for
+// when upstream omits it — cup.aspx has been observed to echo it back
+// (league 75, 2026-07-10), but the caller-supplied id keeps behavior
+// consistent between both mappers regardless.
+func cupStandingFromResponse(leagueID string, r thscore.CupStandingResponse, now time.Time) model.LeagueStanding {
+	id := leagueID
+	if id == "" {
+		id = string(r.LeagueID)
+	}
+	rounds := make([]model.CupRound, 0, len(r.RoundScoreItems))
+	for _, round := range r.RoundScoreItems {
+		groups := make([]model.CupGroup, 0, len(round.GroupScoreItems))
+		for _, g := range round.GroupScoreItems {
+			rows := make([]model.CupRow, 0, len(g.ScoreItems))
+			for _, item := range g.ScoreItems {
+				rows = append(rows, model.CupRow{
+					Rank:           item.Rank,
+					TeamID:         string(item.TeamID),
+					TeamName:       item.TeamName,
+					ColorHex:       item.Color,
+					Played:         item.TotalCount,
+					Win:            item.WinCount,
+					Draw:           item.DrawCount,
+					Lose:           item.LoseCount,
+					GoalsFor:       item.GetScore,
+					GoalsAgainst:   item.LoseScore,
+					GoalDifference: item.GoalDifference,
+					Points:         item.Integral,
+				})
+			}
+			groups = append(groups, model.CupGroup{GroupName: g.GroupName, Rows: rows})
+		}
+		rounds = append(rounds, model.CupRound{RoundName: round.RoundName, Groups: groups})
+	}
+
+	return model.LeagueStanding{
+		ID:            id,
+		Format:        "cup",
+		CurrentSeason: r.Season,
+		CupRounds:     rounds,
+		UpdatedAt:     now,
 	}
 }
 

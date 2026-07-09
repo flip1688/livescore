@@ -196,6 +196,9 @@ func (s *Catalog) Standings(ctx context.Context, leagueID string) (model.LeagueS
 			}
 			return model.LeagueStanding{}, err
 		}
+		if st.Format == "" {
+			st.Format = "league" // docs written before the cup-format field existed
+		}
 		return st, nil
 	})
 }
