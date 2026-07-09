@@ -35,8 +35,15 @@ func New(ctx context.Context, uri, dbName string) (*Store, error) {
 
 func (s *Store) Close(ctx context.Context) error { return s.client.Disconnect(ctx) }
 
-// EnsureIndexes creates the indexes the query paths depend on.
-func (s *Store) EnsureIndexes(ctx context.Context) error {
+// EnsureIndexes creates the indexes the query paths depend on, plus TTL
+// indexes that auto-expire match-scoped documents (matches on kickoff_at,
+// match_events/match_stats on updated_at — after matchRetentionDays days;
+// match_analysis on fetched_at — after analysisRetentionDays days, kept
+// shorter since it's the largest doc and worthless once the match has
+// passed). Either <= 0 disables that TTL, dropping the index if present —
+// see ensureTTLIndex doc comment. standings/leagues/teams/countries are
+// never expired.
+func (s *Store) EnsureIndexes(ctx context.Context, matchRetentionDays, analysisRetentionDays int) error {
 	_, err := s.db.Collection("matches").Indexes().CreateMany(ctx, []mongo.IndexModel{
 		{Keys: bson.D{{Key: "match_date", Value: 1}, {Key: "kickoff_at", Value: 1}}},
 		{Keys: bson.D{{Key: "league_id", Value: 1}, {Key: "kickoff_at", Value: 1}}},
@@ -48,7 +55,177 @@ func (s *Store) EnsureIndexes(ctx context.Context) error {
 	_, err = s.db.Collection("teams").Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "league_id", Value: 1}},
 	})
-	return err
+	if err != nil {
+		return err
+	}
+
+	ttlSpecs := []struct {
+		coll      string
+		field     string
+		retention int
+	}{
+		{"matches", "kickoff_at", matchRetentionDays},
+		{"match_events", "updated_at", matchRetentionDays},
+		{"match_stats", "updated_at", matchRetentionDays},
+		{"match_analysis", "fetched_at", analysisRetentionDays},
+	}
+	for _, spec := range ttlSpecs {
+		if err := ensureTTLIndex(ctx, s.db.Collection(spec.coll), spec.field, spec.retention); err != nil {
+			return fmt.Errorf("ttl index on %s.%s: %w", spec.coll, spec.field, err)
+		}
+	}
+	return nil
+}
+
+// ensureTTLIndex creates (or updates, or drops) a single-field TTL index on
+// a date-typed field, tolerating repeated calls with the same or a changed
+// retentionDays across process restarts:
+//   - retentionDays <= 0: drop the TTL index if one exists (TTL disabled).
+//   - otherwise: create it; if it already exists with a different
+//     expireAfterSeconds, Mongo returns IndexOptionsConflict (or
+//     IndexKeySpecsConflict) — handle that by running collMod to update the
+//     TTL in place, falling back to drop+recreate if collMod itself fails.
+func ensureTTLIndex(ctx context.Context, coll *mongo.Collection, field string, retentionDays int) error {
+	keyPattern := bson.D{{Key: field, Value: 1}}
+
+	if retentionDays <= 0 {
+		name, found, err := findIndexNameByField(ctx, coll, field)
+		if err != nil {
+			return fmt.Errorf("look up existing ttl index: %w", err)
+		}
+		if !found {
+			return nil
+		}
+		err = coll.Indexes().DropOne(ctx, name)
+		if err != nil && !isNamespaceOrIndexNotFound(err) {
+			return fmt.Errorf("drop ttl index %s: %w", name, err)
+		}
+		return nil
+	}
+
+	expireAfterSeconds := int32(retentionDays) * 86400
+	indexName := field + "_ttl"
+	_, err := coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    keyPattern,
+		Options: options.Index().SetName(indexName).SetExpireAfterSeconds(expireAfterSeconds),
+	})
+	if err == nil {
+		return nil
+	}
+	if !isIndexOptionsConflict(err) {
+		return fmt.Errorf("create ttl index: %w", err)
+	}
+
+	// An index on this field already exists with a different
+	// expireAfterSeconds (e.g. retention setting changed since last run).
+	// Try updating it in place first.
+	if err := collModTTL(ctx, coll, keyPattern, expireAfterSeconds); err == nil {
+		return nil
+	}
+
+	// collMod failed (e.g. the pre-existing index isn't even a TTL index) —
+	// fall back to drop+recreate.
+	name, found, lookupErr := findIndexNameByField(ctx, coll, field)
+	if lookupErr != nil {
+		return fmt.Errorf("look up conflicting index: %w", lookupErr)
+	}
+	if found {
+		if err := coll.Indexes().DropOne(ctx, name); err != nil && !isNamespaceOrIndexNotFound(err) {
+			return fmt.Errorf("drop conflicting index %s: %w", name, err)
+		}
+	}
+	_, err = coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    keyPattern,
+		Options: options.Index().SetName(indexName).SetExpireAfterSeconds(expireAfterSeconds),
+	})
+	if err != nil {
+		return fmt.Errorf("recreate ttl index: %w", err)
+	}
+	return nil
+}
+
+// collModTTL updates expireAfterSeconds on an existing index in place,
+// addressed by its key pattern rather than its name (name may not be known,
+// or may not follow our own naming convention if hand-created previously).
+func collModTTL(ctx context.Context, coll *mongo.Collection, keyPattern bson.D, expireAfterSeconds int32) error {
+	cmd := bson.D{
+		{Key: "collMod", Value: coll.Name()},
+		{Key: "index", Value: bson.D{
+			{Key: "keyPattern", Value: keyPattern},
+			{Key: "expireAfterSeconds", Value: expireAfterSeconds},
+		}},
+	}
+	return coll.Database().RunCommand(ctx, cmd).Err()
+}
+
+// findIndexNameByField returns the name of the single-field index on field
+// (if any), regardless of what it's named — covers indexes created under a
+// different naming convention than our own "<field>_ttl".
+func findIndexNameByField(ctx context.Context, coll *mongo.Collection, field string) (string, bool, error) {
+	cur, err := coll.Indexes().List(ctx)
+	if err != nil {
+		if isNamespaceOrIndexNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	var specs []bson.M
+	if err := cur.All(ctx, &specs); err != nil {
+		return "", false, err
+	}
+	for _, spec := range specs {
+		// The driver decodes the nested "key" document as bson.D (not
+		// bson.M) even though the outer document was requested as bson.M.
+		key, _ := spec["key"].(bson.D)
+		if len(key) != 1 {
+			continue
+		}
+		if key[0].Key == field && isOne(key[0].Value) {
+			name, _ := spec["name"].(string)
+			return name, name != "", nil
+		}
+	}
+	return "", false, nil
+}
+
+func isOne(v any) bool {
+	switch n := v.(type) {
+	case int32:
+		return n == 1
+	case int64:
+		return n == 1
+	case float64:
+		return n == 1
+	case float32:
+		return n == 1
+	default:
+		return false
+	}
+}
+
+// isIndexOptionsConflict reports whether err is Mongo's response to creating
+// an index that already exists with different options (expireAfterSeconds in
+// our case) — server codes 85 (IndexOptionsConflict) and 86
+// (IndexKeySpecsConflict).
+func isIndexOptionsConflict(err error) bool {
+	var ce mongo.CommandError
+	if errors.As(err, &ce) {
+		return ce.Code == 85 || ce.Code == 86
+	}
+	return false
+}
+
+// isNamespaceOrIndexNotFound reports whether err is Mongo telling us the
+// collection/index we tried to touch doesn't exist — expected and harmless
+// when TTL is being disabled on a collection that was never created, or an
+// index that was already dropped.
+func isNamespaceOrIndexNotFound(err error) bool {
+	var ce mongo.CommandError
+	if errors.As(err, &ce) {
+		// 26 = NamespaceNotFound, 27 = IndexNotFound
+		return ce.Code == 26 || ce.Code == 27
+	}
+	return false
 }
 
 // upsertByID replaces each doc by _id, inserting when absent.

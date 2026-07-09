@@ -49,7 +49,7 @@ func run(log *slog.Logger, once string) error {
 		return err
 	}
 	defer st.Close(context.Background())
-	if err := st.EnsureIndexes(ctx); err != nil {
+	if err := st.EnsureIndexes(ctx, cfg.MatchRetentionDays, cfg.AnalysisRetentionDays); err != nil {
 		return fmt.Errorf("ensure indexes: %w", err)
 	}
 

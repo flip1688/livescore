@@ -34,6 +34,18 @@ type Config struct {
 	DictionaryTTL time.Duration // leagues/teams
 	LiveTTL       time.Duration // in-play matches
 
+	// MatchRetentionDays is how long match-scoped documents (matches,
+	// match_events, match_stats) live before MongoDB's TTL monitor
+	// auto-deletes them. <= 0 disables TTL entirely (indexes are dropped if
+	// present). Does not apply to standings/leagues/teams/countries.
+	MatchRetentionDays int
+
+	// AnalysisRetentionDays is the (shorter) TTL for match_analysis — the
+	// pre-match H2H blob is the largest doc (~16KB) and worthless once the
+	// match has passed, so it gets its own retention separate from
+	// MatchRetentionDays. <= 0 disables that TTL index.
+	AnalysisRetentionDays int
+
 	// WSAllowedOrigins restricts WebSocket upgrades (comma-separated,
 	// e.g. "https://example.com"). Empty = allow all (dev only).
 	WSAllowedOrigins []string
@@ -73,6 +85,9 @@ func Load() (*Config, error) {
 		ThscoreRPS:     envFloat("THSCORE_RPS", 1),
 		DictionaryTTL:  envDuration("DICTIONARY_TTL", 6*time.Hour),
 		LiveTTL:        envDuration("LIVE_TTL", 10*time.Second),
+
+		MatchRetentionDays:    envInt("MATCH_RETENTION_DAYS", 30),
+		AnalysisRetentionDays: envInt("ANALYSIS_RETENTION_DAYS", 7),
 
 		R2AccountID:       os.Getenv("R2_ACCOUNT_ID"),
 		R2AccessKeyID:     os.Getenv("R2_ACCESS_KEY_ID"),
