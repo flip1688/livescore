@@ -318,10 +318,56 @@ func (s *Syncer) upsertScheduleRows(ctx context.Context, rows []thscore.Livescor
 		matches = append(matches, m)
 		dates[m.MatchDate] = struct{}{}
 	}
+	if err := s.stampTeamLogos(ctx, matches); err != nil {
+		s.log.Warn("stamp team logos", "err", err)
+	}
 	if err := s.store.UpsertMatches(ctx, matches); err != nil {
 		return err
 	}
 	s.evictMatchdates(ctx, dates)
+	return nil
+}
+
+// stampTeamLogos fills HomeLogoURL/AwayLogoURL on each match from the teams
+// collection's mirrored logo_url, denormalizing it the same way LeagueName/
+// LeagueColor already are — one projected query per batch rather than a
+// per-match lookup. Logos are a display nicety, never load-bearing for match
+// data, so a lookup failure is returned for the caller to log and continue
+// with rather than aborting the sync pass.
+//
+// The live-changes path (applyChange) never calls this: it starts from the
+// previous Match state (Redis, or Mongo when Redis is cold) and the delta
+// feed carries no team fields, so whatever was stamped here on the last
+// schedule/snapshot pass simply survives the merge untouched.
+func (s *Syncer) stampTeamLogos(ctx context.Context, matches []model.Match) error {
+	if len(matches) == 0 {
+		return nil
+	}
+	ids := make(map[string]struct{}, len(matches)*2)
+	for _, m := range matches {
+		if m.HomeTeamID != "" {
+			ids[m.HomeTeamID] = struct{}{}
+		}
+		if m.AwayTeamID != "" {
+			ids[m.AwayTeamID] = struct{}{}
+		}
+	}
+	teamIDs := make([]string, 0, len(ids))
+	for id := range ids {
+		teamIDs = append(teamIDs, id)
+	}
+	logoByID, err := s.store.TeamLogoURLsForIDs(ctx, teamIDs)
+	if err != nil {
+		return err
+	}
+	for i := range matches {
+		if u, ok := logoByID[matches[i].HomeTeamID]; ok {
+			matches[i].HomeLogoURL = u
+		}
+		if u, ok := logoByID[matches[i].AwayTeamID]; ok {
+			matches[i].AwayLogoURL = u
+		}
+	}
 	return nil
 }
 
@@ -396,6 +442,14 @@ func (s *Syncer) syncLiveSnapshot(ctx context.Context) error {
 			m.Minute = minute
 		}
 		matches = append(matches, m)
+	}
+	// Stamp logos before the Redis write: Redis is the WS snapshot source and
+	// the base state the live-changes delta merges onto, so the fields must
+	// be present here, not just on the Mongo doc.
+	if err := s.stampTeamLogos(ctx, matches); err != nil {
+		s.log.Warn("stamp team logos", "err", err)
+	}
+	for _, m := range matches {
 		if err := s.cache.SetJSON(ctx, liveMatchKey(m.ID), m, liveStateTTL); err != nil {
 			s.log.Warn("write live state", "match_id", m.ID, "err", err)
 		}

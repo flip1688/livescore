@@ -12,12 +12,16 @@ import (
 )
 
 type Handler struct {
-	catalog *service.Catalog
-	log     *slog.Logger
+	catalog            *service.Catalog
+	log                *slog.Logger
+	corsAllowedOrigins []string
 }
 
-func New(catalog *service.Catalog, log *slog.Logger) *Handler {
-	return &Handler{catalog: catalog, log: log}
+// corsAllowedOrigins restricts which browser origins get CORS headers
+// (comma-separated allowlist, "*" = any origin); empty disables CORS
+// entirely. See internal/config for how it's parsed from env.
+func New(catalog *service.Catalog, log *slog.Logger, corsAllowedOrigins []string) *Handler {
+	return &Handler{catalog: catalog, log: log, corsAllowedOrigins: corsAllowedOrigins}
 }
 
 func (h *Handler) Routes() http.Handler {
@@ -31,7 +35,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /v1/matches/{matchID}/events", h.listMatchEvents)
 	mux.HandleFunc("GET /v1/matches/{matchID}/stats", h.listMatchStats)
 	mux.HandleFunc("GET /v1/matches/{matchID}/analysis", h.getMatchAnalysis)
-	return mux
+	return corsMiddleware(h.corsAllowedOrigins, mux)
 }
 
 // getStandings returns one league's table (all 6 standing views).

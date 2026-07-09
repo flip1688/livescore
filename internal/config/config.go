@@ -38,6 +38,12 @@ type Config struct {
 	// e.g. "https://example.com"). Empty = allow all (dev only).
 	WSAllowedOrigins []string
 
+	// CORSAllowedOrigins restricts which browser origins get CORS headers on
+	// the REST API (comma-separated, e.g. "https://example.com"). Empty = no
+	// CORS headers at all (same-origin/server-to-server only). "*" allows any
+	// origin.
+	CORSAllowedOrigins []string
+
 	// Cloudflare R2 (S3-compatible) — mirrors team/league logos so we never
 	// hotlink thscore's CDN. All five empty = mirroring disabled (dev mode,
 	// source URLs passed through as-is).
@@ -76,13 +82,8 @@ func Load() (*Config, error) {
 
 		LogoDNSServer: os.Getenv("LOGO_DNS_SERVER"),
 	}
-	if v := os.Getenv("WS_ALLOWED_ORIGINS"); v != "" {
-		for _, o := range strings.Split(v, ",") {
-			if o = strings.TrimSpace(o); o != "" {
-				cfg.WSAllowedOrigins = append(cfg.WSAllowedOrigins, o)
-			}
-		}
-	}
+	cfg.WSAllowedOrigins = envOriginList("WS_ALLOWED_ORIGINS")
+	cfg.CORSAllowedOrigins = envOriginList("CORS_ALLOWED_ORIGINS")
 	if cfg.MongoURI == "" {
 		return nil, fmt.Errorf("MONGO_URI is required")
 	}
@@ -150,6 +151,23 @@ func LoadDotEnv(path string) {
 		}
 		os.Setenv(key, value)
 	}
+}
+
+// envOriginList parses a comma-separated origin allowlist env var (used by
+// both WS_ALLOWED_ORIGINS and CORS_ALLOWED_ORIGINS), trimming whitespace and
+// dropping empty entries. Returns nil when the var is unset/empty.
+func envOriginList(key string) []string {
+	v := os.Getenv(key)
+	if v == "" {
+		return nil
+	}
+	var out []string
+	for _, o := range strings.Split(v, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			out = append(out, o)
+		}
+	}
+	return out
 }
 
 func envStr(key, def string) string {

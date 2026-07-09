@@ -103,7 +103,7 @@ func run(log *slog.Logger, once string) error {
 
 	root := http.NewServeMux()
 	root.Handle("GET /ws", hub.Handler(cfg.WSAllowedOrigins))
-	root.Handle("/", handler.New(catalog, log).Routes())
+	root.Handle("/", handler.New(catalog, log, cfg.CORSAllowedOrigins).Routes())
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),

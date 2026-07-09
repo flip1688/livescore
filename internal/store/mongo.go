@@ -298,6 +298,37 @@ func (s *Store) ListTeams(ctx context.Context, leagueID string) ([]model.Team, e
 	return findAll[model.Team](ctx, s.db.Collection("teams"), filter, bson.D{{Key: "name", Value: 1}})
 }
 
+// TeamLogoURLsForIDs fetches the mirrored logo_url for a set of team ids in
+// one projected query (id + logo_url only) — used to stamp Match.HomeLogoURL/
+// AwayLogoURL at sync time without loading full Team docs. Teams with no
+// mirrored logo yet are simply absent from the returned map.
+func (s *Store) TeamLogoURLsForIDs(ctx context.Context, teamIDs []string) (map[string]string, error) {
+	out := make(map[string]string, len(teamIDs))
+	if len(teamIDs) == 0 {
+		return out, nil
+	}
+	cur, err := s.db.Collection("teams").Find(ctx,
+		bson.M{"_id": bson.M{"$in": teamIDs}},
+		options.Find().SetProjection(bson.M{"logo_url": 1}),
+	)
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		ID      string `bson:"_id"`
+		LogoURL string `bson:"logo_url"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		if r.LogoURL != "" {
+			out[r.ID] = r.LogoURL
+		}
+	}
+	return out, nil
+}
+
 // ListMatchesByMatchDate returns one display day's matches, keyed on the
 // precomputed match_date field (04:00 ICT cutoff), sorted by kickoff.
 func (s *Store) ListMatchesByMatchDate(ctx context.Context, matchDate string) ([]model.Match, error) {

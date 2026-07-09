@@ -3,7 +3,46 @@ package service
 import (
 	"testing"
 	"time"
+
+	"github.com/flip1688/livescore/internal/model"
+	"github.com/flip1688/livescore/internal/thscore"
 )
+
+// applyChange merges a livescores/changes delta onto the previous match
+// state; the delta payload never carries team/league fields (including the
+// denormalized logo URLs), so it must start from prev and leave anything the
+// delta doesn't touch — home_logo_url/away_logo_url in particular — exactly
+// as it was, never blanking them.
+func TestApplyChangePreservesLogoFields(t *testing.T) {
+	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
+	prev := model.Match{
+		ID:          "123",
+		HomeTeamID:  "1",
+		AwayTeamID:  "2",
+		HomeLogoURL: "https://r2.example/teams/1.png",
+		AwayLogoURL: "https://r2.example/teams/2.png",
+		HomeScore:   1,
+		AwayScore:   0,
+	}
+	ch := thscore.LivescoreChange{
+		MatchID:   123,
+		Status:    2,
+		HomeScore: 2,
+		AwayScore: 0,
+	}
+
+	got := applyChange(prev, ch, now)
+
+	if got.HomeLogoURL != prev.HomeLogoURL {
+		t.Errorf("HomeLogoURL = %q, want preserved %q", got.HomeLogoURL, prev.HomeLogoURL)
+	}
+	if got.AwayLogoURL != prev.AwayLogoURL {
+		t.Errorf("AwayLogoURL = %q, want preserved %q", got.AwayLogoURL, prev.AwayLogoURL)
+	}
+	if got.HomeScore != 2 {
+		t.Errorf("HomeScore = %d, want 2 (delta should still apply)", got.HomeScore)
+	}
+}
 
 // analysisSkip must skip a match only when its analysis was fetched inside
 // thscore's own 24h upstream cache window — refetching sooner just burns the

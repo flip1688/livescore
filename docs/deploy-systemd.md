@@ -60,4 +60,5 @@ systemctl status livescore
 ## Reverse proxy
 
 ต้องมี caddy/nginx ทำ TLS + upgrade `/ws` (เหมือนแผนเดิม) — app ฟัง `:8080` (env `PORT`)
-อย่าลืมตั้ง `WS_ALLOWED_ORIGINS` ใน `.env` เมื่อ frontend domain นิ่งแล้ว
+อย่าลืมตั้ง `WS_ALLOWED_ORIGINS` และ `CORS_ALLOWED_ORIGINS` ใน `.env` เมื่อ frontend domain นิ่งแล้ว
+(browser เรียก REST API ตรง ๆ ต้องมี `CORS_ALLOWED_ORIGINS` ด้วย ไม่งั้นโดน CORS block)

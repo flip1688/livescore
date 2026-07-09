@@ -59,11 +59,18 @@ type Match struct {
 	LeagueShortName string `bson:"league_short_name,omitempty" json:"league_short_name,omitempty"`
 	LeagueColor     string `bson:"league_color,omitempty" json:"league_color,omitempty"`
 
-	HomeTeamID string    `bson:"home_team_id" json:"home_team_id"`
-	AwayTeamID string    `bson:"away_team_id" json:"away_team_id"`
-	HomeName   string    `bson:"home_name,omitempty" json:"home_name,omitempty"`
-	AwayName   string    `bson:"away_name,omitempty" json:"away_name,omitempty"`
-	KickoffAt  time.Time `bson:"kickoff_at" json:"kickoff_at"` // matchTime, GMT+7 upstream — stored UTC
+	HomeTeamID string `bson:"home_team_id" json:"home_team_id"`
+	AwayTeamID string `bson:"away_team_id" json:"away_team_id"`
+	HomeName   string `bson:"home_name,omitempty" json:"home_name,omitempty"`
+	AwayName   string `bson:"away_name,omitempty" json:"away_name,omitempty"`
+	// HomeLogoURL/AwayLogoURL are the teams' mirrored (R2) logo URLs,
+	// denormalized from the teams collection at sync time — same pattern as
+	// the LeagueName/LeagueColor fields above. Stamped by the sync worker
+	// (see internal/service/sync.go); never blanked by the live-changes delta
+	// path since applyChange starts from the previous Match state.
+	HomeLogoURL string    `bson:"home_logo_url,omitempty" json:"home_logo_url,omitempty"`
+	AwayLogoURL string    `bson:"away_logo_url,omitempty" json:"away_logo_url,omitempty"`
+	KickoffAt   time.Time `bson:"kickoff_at" json:"kickoff_at"` // matchTime, GMT+7 upstream — stored UTC
 	// MatchDate is the display day ("2006-01-02") under the 04:00 ICT cutoff,
 	// computed from KickoffAt at sync time. Daily-list queries key on this,
 	// never on a KickoffAt range.
