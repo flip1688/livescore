@@ -337,7 +337,7 @@ func (s *Syncer) syncScheduleModifications(ctx context.Context) error {
 	var refetch []string
 	dates := map[string]struct{}{}
 	for _, mod := range mods {
-		id := strconv.Itoa(mod.MatchID)
+		id := string(mod.MatchID)
 		switch mod.Type {
 		case "delete":
 			if old, err := s.store.GetMatch(ctx, id); err == nil {

@@ -192,11 +192,14 @@ type Country struct {
 
 // ScheduleModification records a deletion or reschedule from
 // /football_th/schedule/modify.aspx, covering the past 12h.
+// matchTime arrives as a GMT+7 datetime string OR a unix number depending on
+// the row (same inconsistency as changes.aspx, observed live 2026-07-10) —
+// FlexString absorbs both; parse with ParseTimeAny if ever needed.
 type ScheduleModification struct {
-	MatchID    int    `json:"matchId"`
-	Type       string `json:"type"`       // "modify" or "delete"
-	MatchTime  string `json:"matchTime"`  // original kick-off, GMT+7 — see ParseMatchTime
-	ModifyTime string `json:"modifyTime"` // when the change occurred, GMT+7 (the new kick-off must be re-fetched)
+	MatchID    FlexString `json:"matchId"`
+	Type       string     `json:"type"`       // "modify" or "delete"
+	MatchTime  FlexString `json:"matchTime"`  // original kick-off, GMT+7
+	ModifyTime FlexString `json:"modifyTime"` // when the change occurred, GMT+7 (the new kick-off must be re-fetched)
 }
 
 // --- Standings ---
