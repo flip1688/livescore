@@ -1,0 +1,48 @@
+# livescore — API + sync worker (single binary)
+#
+# Install:
+#   sudo cp deploy/livescore.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now livescore
+# Logs:
+#   journalctl -u livescore -f
+#
+# Fill in User/Group and paths below before installing.
+
+[Unit]
+Description=livescore API + sync worker
+Wants=network-online.target
+# redis-server = the apt-installed local Redis this app reads live state from.
+After=network-online.target redis-server.service
+
+[Service]
+Type=simple
+# TODO: dedicated non-root user (sudo useradd -r -s /usr/sbin/nologin livescore)
+User=livescore
+Group=livescore
+
+# The binary auto-loads ./.env, so WorkingDirectory decides which .env is used.
+# Keep the binary + .env together in this directory.
+WorkingDirectory=/opt/livescore
+ExecStart=/opt/livescore/livescore-api
+
+Restart=always
+RestartSec=3
+# App handles SIGTERM: HTTP drains within 10s, so 15s is a safe ceiling
+# before systemd escalates to SIGKILL.
+TimeoutStopSec=15
+
+# Hardening — cheap wins for a network-facing service.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# strict makes the whole FS read-only for the service; re-allow its own dir
+# (the app itself only reads .env, but this keeps future file writes working).
+ReadWritePaths=/opt/livescore
+
+# JSON slog lines go to stdout -> journald.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

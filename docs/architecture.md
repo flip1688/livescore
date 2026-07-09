@@ -102,15 +102,16 @@ leagues / teams:{leagueId} / matches:{date}   → read cache ของ REST
 - Slow client: buffered channel ต่อ client, เต็มแล้ว drop connection (client reconnect เอง) — ห้าม block hub
 - Auth: ยังไม่ต้อง (เว็บเราเอง) — กันด้วย CORS/origin check พอ
 
-## 7. Deployment (VPS, docker compose)
+## 7. Deployment (VPS, systemd — ตัดสินใจ 2026-07-09 ไม่ใช้ Docker)
 
 ```text
-services: app (Go binary เดียว), redis (local, appendonly)
+livescore.service (Go static binary เดียว) + redis-server (apt)
 Mongo = Atlas (นอกเครื่อง) · reverse proxy = caddy/nginx ทำ TLS + /ws upgrade
 ```
 
-- Config ผ่าน env (`.env`) — มี `THSCORE_BASE_URL`/`THSCORE_API_KEY` (รอ credentials)
-- Log เป็น JSON ลง stdout → `docker logs` พอสำหรับตอนนี้
+- ขั้นตอนติดตั้ง/deploy/backfill: [deploy-systemd.md](deploy-systemd.md) — unit file อยู่ `deploy/livescore.service`, deploy จากเครื่อง dev ด้วย `make deploy`
+- Config ผ่าน `.env` ข้าง binary (`WorkingDirectory` ของ unit เป็นตัวกำหนด) — binary auto-load เอง
+- Log เป็น JSON ลง stdout → journald (`journalctl -u livescore -f`)
 - Backup: Mongo ฝั่ง Atlas จัดการ, Redis เป็น state ที่สร้างใหม่ได้ (แค่รอ snapshot รอบถัดไป) → ไม่ต้อง backup
 
 ## 8. Failure modes
