@@ -1,8 +1,8 @@
-.PHONY: run build test vet redis logo-sync build-linux deploy
+.PHONY: run build test vet redis logo-sync build-linux install deploy
 
 # --- deploy (systemd on the VPS) ---------------------------------------
-# Override per invocation or export in your shell profile:
-#   make deploy DEPLOY_HOST=me@1.2.3.4 DEPLOY_DIR=/opt/livescore
+# On the server (repo cloned there):   make install
+# From the dev machine over ssh:       make deploy DEPLOY_HOST=me@1.2.3.4
 DEPLOY_HOST ?= user@your-server
 DEPLOY_DIR  ?= /opt/livescore
 GOARCH      ?= amd64
@@ -24,8 +24,20 @@ build-linux:
 	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -trimpath -ldflags='-s -w' -o $(BIN_DIR)/livescore-api ./cmd/api
 	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -trimpath -ldflags='-s -w' -o $(BIN_DIR)/livescore-logo-sync ./cmd/logo-sync
 
-# Upload to .new then rename: overwriting a running binary in place fails
-# with ETXTBSY on Linux, while rename is atomic and always safe.
+# Run ON the server after `git pull`: native build, swap binaries in via
+# rename (overwriting a running binary in place fails with ETXTBSY; rename
+# is atomic and always safe), then restart the service. Run as root or
+# prefix with sudo.
+install:
+	CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o $(BIN_DIR)/livescore-api ./cmd/api
+	CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o $(BIN_DIR)/livescore-logo-sync ./cmd/logo-sync
+	mv $(BIN_DIR)/livescore-api $(DEPLOY_DIR)/livescore-api
+	mv $(BIN_DIR)/livescore-logo-sync $(DEPLOY_DIR)/livescore-logo-sync
+	systemctl restart livescore
+	systemctl --no-pager status livescore
+
+# Same flow from the dev machine over ssh (needs $(DEPLOY_DIR)/.incoming/ on
+# the server and a systemd unit already installed).
 deploy: build-linux
 	scp $(BIN_DIR)/livescore-api $(BIN_DIR)/livescore-logo-sync $(DEPLOY_HOST):$(DEPLOY_DIR)/.incoming/
 	ssh $(DEPLOY_HOST) 'mv $(DEPLOY_DIR)/.incoming/livescore-api $(DEPLOY_DIR)/livescore-api \

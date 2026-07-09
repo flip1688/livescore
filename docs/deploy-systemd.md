@@ -23,14 +23,22 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now livescore
 ```
 
-## Deploy รอบถัดไป (จากเครื่อง dev)
+## Deploy รอบถัดไป
 
+**บน server (วิธีหลัก — repo clone อยู่บนเครื่องแล้ว):**
 ```bash
-make deploy DEPLOY_HOST=me@1.2.3.4   # build linux → scp → systemctl restart
+cd ~/go/src/github.com/flip1688/livescore
+git pull
+make install        # native build → วาง binary → systemctl restart + status
 ```
 
-cross-compile ด้วย `CGO_ENABLED=0` เสมอ (static, ไม่ติด glibc) — server เป็น ARM ให้เติม `GOARCH=arm64`
-อัปโหลดเข้า `.incoming/` แล้ว rename ทับ เพราะเขียนทับ binary ที่กำลังรันตรง ๆ จะเจอ `ETXTBSY`; rename ปลอดภัยเสมอ
+**หรือจากเครื่อง dev ผ่าน ssh:**
+```bash
+make deploy DEPLOY_HOST=me@1.2.3.4   # cross-compile → scp เข้า .incoming/ → restart
+```
+
+build ด้วย `CGO_ENABLED=0` เสมอ (static, ไม่ติด glibc) — cross-compile ไป ARM ให้เติม `GOARCH=arm64`
+ทั้งสองทางใช้วิธี build/อัปโหลดไว้ที่อื่นแล้ว `mv` ทับ เพราะเขียนทับ binary ที่กำลังรันตรง ๆ จะเจอ `ETXTBSY`; rename ปลอดภัยเสมอ
 
 ## รัน sync job เดี่ยว / backfill บน server
 
