@@ -121,3 +121,92 @@ func countryFromPayload(c thscore.Country, now time.Time) model.Country {
 		UpdatedAt: now,
 	}
 }
+
+// standingFromResponse maps a thscore standings payload into our domain
+// LeagueStanding. TotalRound/CurrentRound are not populated on LeagueInfo
+// itself (confirmed against a live payload, 2026-07-09) — they live on
+// whichever SubLeagueInfos entry has CurrentSubLeague == true, so that's
+// where we source the league-level round numbers from.
+func standingFromResponse(r thscore.StandingResponse, now time.Time) model.LeagueStanding {
+	subLeagues := make([]model.StandingSubLeague, 0, len(r.SubLeagueInfos))
+	var totalRound, currentRound int
+	for _, sl := range r.SubLeagueInfos {
+		subLeagues = append(subLeagues, model.StandingSubLeague{
+			ID:               string(sl.SubLeagueID),
+			Name:             sl.Name,
+			TotalRound:       sl.TotalRound,
+			CurrentRound:     sl.CurrentRound,
+			HasScore:         sl.HasScore,
+			HasTwoLegs:       sl.HasTwoLegs,
+			CurrentSubLeague: sl.CurrentSubLeague,
+		})
+		if sl.CurrentSubLeague {
+			totalRound = sl.TotalRound
+			currentRound = sl.CurrentRound
+		}
+	}
+
+	return model.LeagueStanding{
+		ID:            string(r.LeagueInfo.LeagueID),
+		Name:          r.LeagueInfo.Name,
+		CurrentSeason: r.LeagueInfo.CurrentSeason,
+		Color:         r.LeagueInfo.Color,
+		ShortName:     r.LeagueInfo.ShortName,
+		TotalRound:    totalRound,
+		CurrentRound:  currentRound,
+		SubLeagues:    subLeagues,
+		Standings: model.StandingViews{
+			Total:    standingRows(r.TotalStandings, r.LeagueColorInfos),
+			Half:     standingRows(r.HalfStandings, r.LeagueColorInfos),
+			Home:     standingRows(r.HomeStandings, r.LeagueColorInfos),
+			Away:     standingRows(r.AwayStandings, r.LeagueColorInfos),
+			HomeHalf: standingRows(r.HomeHalfStandings, r.LeagueColorInfos),
+			AwayHalf: standingRows(r.AwayHalfStandings, r.LeagueColorInfos),
+		},
+		UpdatedAt: now,
+	}
+}
+
+// standingRows maps one standing view's rows, resolving each row's
+// promotion/relegation zone from its Color index into zones.
+func standingRows(rows []thscore.StandingRow, zones []thscore.StandingColorInfo) []model.StandingRow {
+	out := make([]model.StandingRow, 0, len(rows))
+	for _, row := range rows {
+		zone, hex := standingColorZone(row.Color, zones)
+		out = append(out, model.StandingRow{
+			Rank:             row.Rank,
+			TeamID:           string(row.TeamID),
+			WinRate:          row.WinRate,
+			DrawRate:         row.DrawRate,
+			LoseRate:         row.LoseRate,
+			WinAverage:       row.WinAverage,
+			LoseAverage:      row.LoseAverage,
+			Deduction:        row.Deduction,
+			DeductionExplain: row.DeductionExplain,
+			RecentForm: []int{
+				row.RecentFirstResult, row.RecentSecondResult, row.RecentThirdResult,
+				row.RecentFourthResult, row.RecentFifthResult, row.RecentSixthResult,
+			},
+			ColorZone:      zone,
+			ColorHex:       hex,
+			TotalCount:     row.TotalCount,
+			WinCount:       row.WinCount,
+			DrawCount:      row.DrawCount,
+			LoseCount:      row.LoseCount,
+			GetScore:       row.GetScore,
+			LoseScore:      row.LoseScore,
+			GoalDifference: row.GoalDifference,
+			Points:         row.Integral,
+		})
+	}
+	return out
+}
+
+// standingColorZone resolves a row's Color index into its zone label + hex
+// color. -1 (or an out-of-range index) means no promotion/relegation zone.
+func standingColorZone(idx int, zones []thscore.StandingColorInfo) (label, hex string) {
+	if idx < 0 || idx >= len(zones) {
+		return "", ""
+	}
+	return zones[idx].LeagueName, zones[idx].Color
+}

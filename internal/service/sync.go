@@ -69,6 +69,8 @@ func (s *Syncer) Run(ctx context.Context) {
 	go s.loop(ctx, "live-snapshot", 1*time.Minute, s.syncLiveSnapshot)
 	go s.loop(ctx, "live-changes", 15*time.Second, s.syncLiveChanges)
 	go s.loop(ctx, "events-stats", 1*time.Minute, s.syncEventsStats)
+	go s.loop(ctx, "standings", 6*time.Hour, s.syncStandings)
+	go s.loop(ctx, "analysis", 30*time.Minute, s.syncAnalysis)
 	<-ctx.Done()
 }
 
@@ -85,6 +87,8 @@ func (s *Syncer) RunOnce(ctx context.Context, job string) error {
 		"live-snapshot":   s.syncLiveSnapshot,
 		"live-changes":    s.syncLiveChanges,
 		"events-stats":    s.syncEventsStats,
+		"standings":       s.syncStandings,
+		"analysis":        s.syncAnalysis,
 	}
 	fn, ok := jobs[job]
 	if !ok {
@@ -466,6 +470,9 @@ func (s *Syncer) syncEventsStats(ctx context.Context) error {
 		if err := s.store.ReplaceMatchEvents(ctx, id, em.Events); err != nil {
 			return err
 		}
+		if err := s.cache.Delete(ctx, "events:"+id); err != nil {
+			s.log.Warn("evict events cache", "match_id", id, "err", err)
+		}
 		s.pub.Publish("match:"+id, "events", em)
 	}
 
@@ -478,12 +485,147 @@ func (s *Syncer) syncEventsStats(ctx context.Context) error {
 		if err := s.store.ReplaceMatchStats(ctx, id, sm.Stats); err != nil {
 			return err
 		}
+		if err := s.cache.Delete(ctx, "stats:"+id); err != nil {
+			s.log.Warn("evict stats cache", "match_id", id, "err", err)
+		}
 		s.pub.Publish("match:"+id, "stats", sm)
 	}
 
 	if len(events) > 0 || len(stats) > 0 {
 		s.log.Info("events/stats synced", "event_matches", len(events), "stat_matches", len(stats))
 	}
+	return nil
+}
+
+// standingsSyncDates returns yesterday/today/tomorrow's matchdates (04:00 ICT
+// cutoff) — the window syncStandings scopes its league selection to, since a
+// matchdate can carry late-kickoff fixtures that belong to the neighboring
+// calendar day.
+func standingsSyncDates() []string {
+	today, err := time.ParseInLocation("2006-01-02", CurrentMatchDate(time.Now()), Bangkok)
+	if err != nil { // unreachable: CurrentMatchDate always emits 2006-01-02
+		today = time.Now().In(Bangkok)
+	}
+	return []string{
+		today.AddDate(0, 0, -1).Format("2006-01-02"),
+		today.Format("2006-01-02"),
+		today.AddDate(0, 0, 1).Format("2006-01-02"),
+	}
+}
+
+// syncStandings refreshes the league table for every league with a fixture
+// yesterday/today/tomorrow. Runs every 6h; thscore recommends 1 call/day per
+// league (hard limit 5s/call), so this cadence stays well inside both.
+// Per-league failures are logged and skipped so one bad league never blocks
+// the rest of the run.
+func (s *Syncer) syncStandings(ctx context.Context) error {
+	leagueIDs, err := s.store.DistinctLeagueIDsForMatchDates(ctx, standingsSyncDates())
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	synced := 0
+	for _, leagueID := range leagueIDs {
+		if leagueID == "" {
+			continue
+		}
+		resp, err := s.ts.FetchLeagueStanding(ctx, leagueID)
+		if err != nil {
+			s.log.Warn("sync standing failed", "league_id", leagueID, "err", err)
+			continue
+		}
+		st := standingFromResponse(resp, now)
+		if st.ID == "" {
+			st.ID = leagueID // keep our key stable if upstream ever omits leagueInfo.leagueId
+		}
+		if err := s.store.UpsertStanding(ctx, st); err != nil {
+			s.log.Warn("upsert standing failed", "league_id", leagueID, "err", err)
+			continue
+		}
+		if err := s.cache.Delete(ctx, "standings:"+leagueID); err != nil {
+			s.log.Warn("evict standings cache", "league_id", leagueID, "err", err)
+		}
+		synced++
+	}
+	s.log.Info("standings synced", "leagues", len(leagueIDs), "synced", synced)
+	return nil
+}
+
+// analysisLookahead is how far ahead of now the analysis sync job looks for
+// upcoming scheduled matches to pre-fetch H2H/form/odds data for. A user
+// request must never trigger a thscore call (see docs/architecture.md), so
+// analysis has to land in Mongo well before kickoff.
+const analysisLookahead = 24 * time.Hour
+
+// analysisRefetchWindow mirrors thscore's own analysis.aspx cache (24h
+// upstream, per docs/thscore-api.md docs_id=109) — refetching a match sooner
+// than this just burns quota for a payload that hasn't changed.
+const analysisRefetchWindow = 24 * time.Hour
+
+// analysisSyncDates returns the matchdates ("2006-01-02", 04:00 ICT cutoff)
+// spanned by [now, now+analysisLookahead) — at most two consecutive
+// matchdate buckets, since the lookahead window and the bucket size are both
+// 24h. Deduplicated so a single-bucket window (e.g. lookahead landing before
+// the next 04:00 cutoff) yields one date, not a repeated one.
+func analysisSyncDates(now time.Time) []string {
+	from := CurrentMatchDate(now)
+	to := CurrentMatchDate(now.Add(analysisLookahead))
+	if from == to {
+		return []string{from}
+	}
+	return []string{from, to}
+}
+
+// analysisSkip reports whether a match's analysis was fetched recently
+// enough (within analysisRefetchWindow) to skip refetching it now. Pulled
+// out as pure logic so it's unit-testable without a store/clock fake.
+func analysisSkip(now, fetchedAt time.Time) bool {
+	return !fetchedAt.IsZero() && now.Sub(fetchedAt) < analysisRefetchWindow
+}
+
+// syncAnalysis pre-fetches H2H/form/odds/goal-distribution analysis for
+// matches kicking off in the next 24h, skipping any match whose analysis was
+// already fetched within thscore's own 24h upstream cache window. Runs every
+// 30 minutes; per-match failures are logged and skipped so one bad match
+// never blocks the rest of the run.
+func (s *Syncer) syncAnalysis(ctx context.Context) error {
+	now := time.Now()
+	candidates, err := s.store.ListMatchesForAnalysis(ctx, analysisSyncDates(now), now.UTC(), now.Add(analysisLookahead).UTC())
+	if err != nil {
+		return err
+	}
+
+	ids := make([]string, len(candidates))
+	for i, m := range candidates {
+		ids[i] = m.ID
+	}
+	fetchedAt, err := s.store.MatchAnalysisFetchedAtForIDs(ctx, ids)
+	if err != nil {
+		return err
+	}
+
+	skipped, fetched := 0, 0
+	for _, m := range candidates {
+		if analysisSkip(now, fetchedAt[m.ID]) {
+			skipped++
+			continue
+		}
+		raw, err := s.ts.FetchAnalysis(ctx, m.ID)
+		if err != nil {
+			s.log.Warn("fetch analysis failed", "match_id", m.ID, "err", err)
+			continue
+		}
+		a := model.MatchAnalysis{MatchID: m.ID, Analysis: raw, FetchedAt: now.UTC()}
+		if err := s.store.UpsertMatchAnalysis(ctx, a); err != nil {
+			s.log.Warn("upsert analysis failed", "match_id", m.ID, "err", err)
+			continue
+		}
+		if err := s.cache.Delete(ctx, "analysis:"+m.ID); err != nil {
+			s.log.Warn("evict analysis cache", "match_id", m.ID, "err", err)
+		}
+		fetched++
+	}
+	s.log.Info("analysis synced", "selected", len(candidates), "skipped", skipped, "fetched", fetched)
 	return nil
 }
 

@@ -54,7 +54,7 @@ type Config struct {
 }
 
 func Load() (*Config, error) {
-	loadDotEnv(".env")
+	LoadDotEnv(".env")
 	cfg := &Config{
 		Port:           envInt("PORT", 8080),
 		MongoURI:       os.Getenv("MONGO_URI"),
@@ -116,12 +116,14 @@ func (cfg *Config) validateR2() error {
 	return nil
 }
 
-// loadDotEnv seeds os environment variables from a KEY=VALUE file so every
+// LoadDotEnv seeds os environment variables from a KEY=VALUE file so every
 // binary works with a plain `.env` next to it — no `export` dance needed.
 // Real environment variables always win over file values; a missing file is
 // simply ignored. Lines starting with # and blank lines are skipped, and
-// optional surrounding quotes on values are stripped.
-func loadDotEnv(path string) {
+// optional surrounding quotes on values are stripped. Exported so standalone
+// tools that don't need the full Config (e.g. cmd/thscore-smoke) can seed
+// their env the same way.
+func LoadDotEnv(path string) {
 	f, err := os.Open(path)
 	if err != nil {
 		return

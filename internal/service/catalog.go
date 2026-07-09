@@ -11,14 +11,24 @@ import (
 	"strings"
 	"time"
 
+	"go.mongodb.org/mongo-driver/v2/mongo"
+
 	"github.com/flip1688/livescore/internal/cache"
 	"github.com/flip1688/livescore/internal/model"
 	"github.com/flip1688/livescore/internal/store"
+	"github.com/flip1688/livescore/internal/thscore"
 	"github.com/flip1688/livescore/internal/ws"
 )
 
 // ErrBadInput marks errors caused by invalid client input (HTTP 400).
 var ErrBadInput = errors.New("bad input")
+
+// ErrNotFound marks a lookup that found nothing (HTTP 404).
+var ErrNotFound = errors.New("not found")
+
+// matchDetailTTL is short: events/stats are synced every minute and evicted
+// on write, so this only bounds staleness between a sync and its eviction.
+const matchDetailTTL = 30 * time.Second
 
 // Catalog serves dictionary and schedule reads: Redis first, MongoDB on miss.
 // It never calls thscore — only the sync worker does.
@@ -103,20 +113,117 @@ func (s *Catalog) Snapshot(ctx context.Context, channel string) ([]ws.Message, e
 	case "matchlist":
 		return s.listSnapshot(ctx, channel, arg)
 	case "match":
-		var m model.Match
-		if err := s.cache.GetJSON(ctx, liveMatchKey(arg), &m); err != nil {
-			if !errors.Is(err, cache.ErrMiss) {
-				s.log.Warn("snapshot: live state read failed", "channel", channel, "err", err)
-			}
-			var dbErr error
-			if m, dbErr = s.store.GetMatch(ctx, arg); dbErr != nil {
-				return nil, nil // unknown match: no snapshot, deltas may still follow
-			}
+		m, err := s.matchState(ctx, arg)
+		if err != nil {
+			return nil, nil // unknown match (or DB hiccup): no snapshot, deltas may still follow
 		}
 		return snapshotMessages(channel, m)
 	default:
 		return nil, nil
 	}
+}
+
+// matchState resolves the current state of one match: Redis live state
+// (`live:match:<id>`) first, falling back to MongoDB. Returns ErrNotFound
+// when neither source has the match.
+func (s *Catalog) matchState(ctx context.Context, id string) (model.Match, error) {
+	var m model.Match
+	if err := s.cache.GetJSON(ctx, liveMatchKey(id), &m); err == nil {
+		return m, nil
+	} else if !errors.Is(err, cache.ErrMiss) {
+		s.log.Warn("match state: live cache read failed", "match_id", id, "err", err)
+	}
+
+	m, err := s.store.GetMatch(ctx, id)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return model.Match{}, fmt.Errorf("match %s: %w", id, ErrNotFound)
+		}
+		return model.Match{}, err
+	}
+	return m, nil
+}
+
+// Match returns one match's current state by id — the REST counterpart of
+// the `match:<id>` WS channel's snapshot.
+func (s *Catalog) Match(ctx context.Context, id string) (model.Match, error) {
+	if id == "" {
+		return model.Match{}, fmt.Errorf("%w: match id required", ErrBadInput)
+	}
+	return s.matchState(ctx, id)
+}
+
+// MatchEvents returns the event timeline for one match (empty slice if none
+// has been synced yet). Cached briefly; syncEventsStats evicts the key on
+// every write so this TTL only bounds staleness between sync and eviction.
+func (s *Catalog) MatchEvents(ctx context.Context, id string) ([]thscore.EventItem, error) {
+	if id == "" {
+		return nil, fmt.Errorf("%w: match id required", ErrBadInput)
+	}
+	return readThrough(ctx, s, "events:"+id, matchDetailTTL, func() ([]thscore.EventItem, error) {
+		return s.store.GetMatchEvents(ctx, id)
+	})
+}
+
+// MatchStats returns the technical stats for one match (empty slice if none
+// has been synced yet). Same cache/eviction story as MatchEvents.
+func (s *Catalog) MatchStats(ctx context.Context, id string) ([]thscore.StatItem, error) {
+	if id == "" {
+		return nil, fmt.Errorf("%w: match id required", ErrBadInput)
+	}
+	return readThrough(ctx, s, "stats:"+id, matchDetailTTL, func() ([]thscore.StatItem, error) {
+		return s.store.GetMatchStats(ctx, id)
+	})
+}
+
+// standingsTTL: the sync worker refreshes tables every 6h and evicts the
+// cache key on every successful upsert, so this only bounds staleness
+// between a sync and its eviction.
+const standingsTTL = 6 * time.Hour
+
+// Standings returns one league's table (all 6 standing views), Redis first
+// falling back to MongoDB. ErrNotFound if the league has never been synced
+// (unknown id, or simply no fixtures in the sync window yet).
+func (s *Catalog) Standings(ctx context.Context, leagueID string) (model.LeagueStanding, error) {
+	if leagueID == "" {
+		return model.LeagueStanding{}, fmt.Errorf("%w: league id required", ErrBadInput)
+	}
+	return readThroughOne(ctx, s, "standings:"+leagueID, standingsTTL, func() (model.LeagueStanding, error) {
+		st, err := s.store.GetStanding(ctx, leagueID)
+		if err != nil {
+			if errors.Is(err, mongo.ErrNoDocuments) {
+				return model.LeagueStanding{}, fmt.Errorf("standings %s: %w", leagueID, ErrNotFound)
+			}
+			return model.LeagueStanding{}, err
+		}
+		return st, nil
+	})
+}
+
+// analysisTTL: the sync worker refreshes analysis every 30m (skipping
+// matches fetched within the last 24h) and evicts the cache key on every
+// upsert, so this only bounds staleness between a sync and its eviction —
+// kept well under thscore's own 24h upstream cache.
+const analysisTTL = 6 * time.Hour
+
+// MatchAnalysis returns one match's pre-fetched H2H/form/odds analysis blob
+// as thscore sent it (see model.MatchAnalysis), Redis first falling back to
+// MongoDB. ErrNotFound if the match hasn't been analyzed yet (not scheduled
+// within the sync window, or synced but thscore had nothing for it).
+func (s *Catalog) MatchAnalysis(ctx context.Context, matchID string) (json.RawMessage, error) {
+	if matchID == "" {
+		return nil, fmt.Errorf("%w: match id required", ErrBadInput)
+	}
+	return readThroughOne(ctx, s, "analysis:"+matchID, analysisTTL, func() (json.RawMessage, error) {
+		a, err := s.store.GetMatchAnalysis(ctx, matchID)
+		if err != nil {
+			if errors.Is(err, mongo.ErrNoDocuments) {
+				return nil, fmt.Errorf("analysis %s: %w", matchID, ErrNotFound)
+			}
+			return nil, err
+		}
+		return a.Analysis, nil
+	})
 }
 
 func (s *Catalog) listSnapshot(ctx context.Context, channel, date string) ([]ws.Message, error) {
@@ -150,6 +257,31 @@ func readThrough[T any](ctx context.Context, s *Catalog, key string, ttl time.Du
 	fresh, err := load()
 	if err != nil {
 		return nil, fmt.Errorf("load %s: %w", key, err)
+	}
+	if err := s.cache.SetJSON(ctx, key, fresh, ttl); err != nil {
+		s.log.Warn("cache write failed", "key", key, "err", err)
+	}
+	return fresh, nil
+}
+
+// readThroughOne is readThrough's single-document counterpart: same
+// cache-then-load-then-populate flow, but for one T instead of a list. load's
+// error (including ErrNotFound) always propagates uncached, so a league that
+// hasn't synced yet is re-checked on every call rather than pinned as absent.
+func readThroughOne[T any](ctx context.Context, s *Catalog, key string, ttl time.Duration, load func() (T, error)) (T, error) {
+	var zero T
+	var cached T
+	err := s.cache.GetJSON(ctx, key, &cached)
+	if err == nil {
+		return cached, nil
+	}
+	if !errors.Is(err, cache.ErrMiss) {
+		s.log.Warn("cache read failed", "key", key, "err", err)
+	}
+
+	fresh, err := load()
+	if err != nil {
+		return zero, err
 	}
 	if err := s.cache.SetJSON(ctx, key, fresh, ttl); err != nil {
 		s.log.Warn("cache write failed", "key", key, "err", err)

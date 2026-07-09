@@ -22,17 +22,22 @@ import (
 	"strings"
 	"time"
 
+	"github.com/flip1688/livescore/internal/config"
 	"github.com/flip1688/livescore/internal/thscore"
 )
 
 var (
-	baseURL = os.Getenv("THSCORE_BASE_URL")
-	apiKey  = os.Getenv("THSCORE_API_KEY")
+	baseURL string
+	apiKey  string
 	outDir  string
 	only    map[string]bool
 )
 
 func main() {
+	config.LoadDotEnv(".env") // so THSCORE_BASE_URL/THSCORE_API_KEY don't need exporting
+	baseURL = os.Getenv("THSCORE_BASE_URL")
+	apiKey = os.Getenv("THSCORE_API_KEY")
+
 	flag.StringVar(&outDir, "out", "smoke-out", "directory for raw payload dumps")
 	onlyFlag := flag.String("only", "", "comma-separated endpoint names to test (default: all); respect the per-endpoint rate limits when re-running")
 	flag.Parse()
@@ -62,6 +67,114 @@ func main() {
 	run[thscore.LivescoreChange]("changes", "/football_th/livescores/changes.aspx", nil)
 	run[thscore.EventsMatch]("events", "/football_th/events.aspx", url.Values{"cmd": {"new"}})
 	run[thscore.StatsMatch]("stats", "/football_th/stats.aspx", nil)
+
+	// standing/league.aspx is keyed by leagueId (hard limit 5s/call — only
+	// ever called once here), so discover one from today's schedule first.
+	if only == nil || only["standing"] {
+		leagueID := discoverLeagueID(today)
+		if leagueID == "" {
+			fmt.Println("== standing: skipped (could not discover a leagueId from today's schedule)")
+		} else {
+			runObj[thscore.StandingResponse]("standing", "/football_th/standing/league.aspx", url.Values{"leagueId": {leagueID}})
+		}
+	}
+
+	// analysis.aspx is keyed by matchId (hard limit 1s/call, recommended 6h/
+	// call per match) and has no typed struct — its field schema isn't
+	// documented, so the payload is stored/served as an opaque JSON blob
+	// (see internal/thscore.FetchAnalysis). Just confirm the envelope shape.
+	if only == nil || only["analysis"] {
+		runAnalysis(discoverMatchID(today))
+	}
+}
+
+// discoverMatchID quietly fetches today's schedule and returns the first
+// matchId found, to feed the "analysis" smoke case. Errors degrade to ""
+// (the case is then skipped) rather than aborting the whole smoke run.
+func discoverMatchID(date string) string {
+	body, err := get("/football_th/schedule/basic.aspx", url.Values{"date": {date}})
+	if err != nil {
+		return ""
+	}
+	var env struct {
+		Data []struct {
+			MatchID json.Number `json:"matchId"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil || len(env.Data) == 0 {
+		return ""
+	}
+	return env.Data[0].MatchID.String()
+}
+
+// runAnalysis fetches analysis.aspx for one matchId and reports only the
+// envelope shape (code/message/data present? "data" an object? which top-
+// level keys?) — there is no typed struct for this endpoint to validate
+// against, by design (see internal/thscore.FetchAnalysis).
+func runAnalysis(matchID string) {
+	name, path := "analysis", "/football_th/analysis.aspx"
+	fmt.Printf("== %s (%s)\n", name, path)
+	if matchID == "" {
+		fmt.Println("   skipped (could not discover a matchId from today's schedule)")
+		return
+	}
+	body, err := get(path, url.Values{"matchId": {matchID}})
+	if err != nil {
+		fmt.Printf("   FETCH ERROR: %v\n", err)
+		return
+	}
+	if err := os.WriteFile(filepath.Join(outDir, name+".json"), body, 0o644); err != nil {
+		fmt.Printf("   write dump: %v\n", err)
+	}
+
+	var env struct {
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		fmt.Printf("   ENVELOPE DECODE ERROR: %v (body: %.120s)\n", err, body)
+		return
+	}
+	if env.Code != 0 {
+		fmt.Printf("   API ERROR: code=%d message=%q\n", env.Code, env.Message)
+		return
+	}
+	if len(env.Data) == 0 || string(env.Data) == "null" {
+		fmt.Println("   data: empty/null")
+		return
+	}
+	var inner map[string]json.RawMessage
+	if err := json.Unmarshal(env.Data, &inner); err != nil {
+		fmt.Printf("   DATA NOT AN OBJECT: %v (data: %.120s)\n", err, env.Data)
+		return
+	}
+	keys := make([]string, 0, len(inner))
+	for k := range inner {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	fmt.Printf("   OK: envelope has 'data' object, keys: %s\n", strings.Join(keys, ", "))
+}
+
+// discoverLeagueID quietly fetches today's schedule and returns the first
+// leagueId found, to feed the per-league "standing" smoke case. Errors
+// degrade to "" (the standing case is then skipped) rather than aborting the
+// whole smoke run.
+func discoverLeagueID(date string) string {
+	body, err := get("/football_th/schedule/basic.aspx", url.Values{"date": {date}})
+	if err != nil {
+		return ""
+	}
+	var env struct {
+		Data []struct {
+			LeagueID int `json:"leagueId"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil || len(env.Data) == 0 {
+		return ""
+	}
+	return fmt.Sprint(env.Data[0].LeagueID)
 }
 
 // run fetches one endpoint and prints a validation report for element type T.
@@ -159,6 +272,76 @@ func run[T any](name, path string, params url.Values) {
 		}
 	}
 	if len(extra) == 0 && len(strictErrs) == 0 {
+		fmt.Println("   OK: struct covers payload")
+	}
+}
+
+// runObj validates a single-object response for element type T — unlike run,
+// it does not expect the {"code","message","data"} envelope (standing/league
+// returns the object directly) and Data is a single object, not an array.
+func runObj[T any](name, path string, params url.Values) {
+	if only != nil && !only[name] {
+		return
+	}
+	fmt.Printf("== %s (%s)\n", name, path)
+	body, err := get(path, params)
+	if err != nil {
+		fmt.Printf("   FETCH ERROR: %v\n", err)
+		return
+	}
+	if err := os.WriteFile(filepath.Join(outDir, name+".json"), body, 0o644); err != nil {
+		fmt.Printf("   write dump: %v\n", err)
+	}
+
+	// The endpoint may still surface a rate-limit error as a top-level
+	// {"code","message"} pair (see thscore.Client.FetchLeagueStanding).
+	var probe struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &probe); err == nil && probe.Code != 0 {
+		fmt.Printf("   API ERROR: code=%d message=%q\n", probe.Code, probe.Message)
+		return
+	}
+
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(body, &m); err != nil {
+		fmt.Printf("   DATA NOT AN OBJECT: %v (body: %.200s)\n", err, body)
+		return
+	}
+	known := jsonTags(reflect.TypeFor[T]())
+	var extra, missing []string
+	for k := range m {
+		if !known[k] {
+			extra = append(extra, k)
+		}
+	}
+	for k := range known {
+		if _, ok := m[k]; !ok {
+			missing = append(missing, k)
+		}
+	}
+	sort.Strings(extra)
+	sort.Strings(missing)
+
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	var v T
+	strictErr := ""
+	if err := dec.Decode(&v); err != nil {
+		strictErr = err.Error()
+	}
+
+	if len(extra) > 0 {
+		fmt.Printf("   payload fields NOT in struct: %s\n", strings.Join(extra, ", "))
+	}
+	if len(missing) > 0 {
+		fmt.Printf("   struct fields never in payload: %s\n", strings.Join(missing, ", "))
+	}
+	if strictErr != "" {
+		fmt.Printf("   strict-decode error: %s\n", strictErr)
+	}
+	if len(extra) == 0 && strictErr == "" {
 		fmt.Println("   OK: struct covers payload")
 	}
 }

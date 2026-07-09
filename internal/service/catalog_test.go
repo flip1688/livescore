@@ -1,6 +1,8 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -27,5 +29,32 @@ func TestCurrentMatchDate(t *testing.T) {
 		if got := CurrentMatchDate(now); got != c.want {
 			t.Errorf("CurrentMatchDate(%s) = %s, want %s", c.now, got, c.want)
 		}
+	}
+}
+
+// Match/MatchEvents/MatchStats/Standings must reject an empty id before
+// touching the store or cache — validated here on a zero-value Catalog (nil
+// store/cache) so a bug that moved the check after an I/O call would panic
+// instead of silently passing.
+func TestMatchDetailRejectsEmptyID(t *testing.T) {
+	c := &Catalog{}
+	ctx := context.Background()
+
+	cases := []struct {
+		name string
+		call func() error
+	}{
+		{"Match", func() error { _, err := c.Match(ctx, ""); return err }},
+		{"MatchEvents", func() error { _, err := c.MatchEvents(ctx, ""); return err }},
+		{"MatchStats", func() error { _, err := c.MatchStats(ctx, ""); return err }},
+		{"Standings", func() error { _, err := c.Standings(ctx, ""); return err }},
+		{"MatchAnalysis", func() error { _, err := c.MatchAnalysis(ctx, ""); return err }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.call(); !errors.Is(err, ErrBadInput) {
+				t.Errorf("%s(\"\") error = %v, want ErrBadInput", tc.name, err)
+			}
+		})
 	}
 }

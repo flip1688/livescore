@@ -24,7 +24,7 @@ func TestLoadDotEnv(t *testing.T) {
 	}
 	t.Setenv("TEST_DOTENV_PRESET", "from-env")
 
-	loadDotEnv(path)
+	LoadDotEnv(path)
 
 	if got := os.Getenv("TEST_DOTENV_PLAIN"); got != "hello" {
 		t.Errorf("PLAIN = %q, want hello", got)
@@ -43,5 +43,5 @@ func TestLoadDotEnv(t *testing.T) {
 }
 
 func TestLoadDotEnv_MissingFile(t *testing.T) {
-	loadDotEnv(filepath.Join(t.TempDir(), "no-such-file")) // must not panic
+	LoadDotEnv(filepath.Join(t.TempDir(), "no-such-file")) // must not panic
 }

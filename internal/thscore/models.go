@@ -198,3 +198,107 @@ type ScheduleModification struct {
 	MatchTime  string `json:"matchTime"`  // original kick-off, GMT+7 — see ParseMatchTime
 	ModifyTime string `json:"modifyTime"` // when the change occurred, GMT+7 (the new kick-off must be re-fetched)
 }
+
+// --- Standings ---
+//
+// Shapes below are confirmed against a production thscore client
+// (ChangPuakk/widgets, internal/services/thscore.go + pkg/models/thscore.go)
+// and cross-checked with cmd/thscore-smoke against a live payload
+// (2026-07-09). Notably /football_th/standing/league.aspx returns the
+// standing object directly — no {"code","message","data"} envelope, unlike
+// every other typed endpoint — see Client.FetchLeagueStanding.
+
+// StandingSubLeagueInfo describes one stage/division a league's standing can
+// be split into (e.g. group stage vs. playoff group).
+type StandingSubLeagueInfo struct {
+	SubLeagueID      FlexString `json:"subLeagueId"`
+	Name             string     `json:"name"`
+	TotalRound       int        `json:"totalRound"`
+	CurrentRound     int        `json:"currentRound"`
+	HasScore         bool       `json:"hasScore"`
+	HasTwoLegs       bool       `json:"hasTwoLegs"`
+	CurrentSubLeague bool       `json:"currentSubLeague"`
+}
+
+// StandingLeagueInfo is the league header of a standing response.
+// TotalRound/CurrentRound are NOT populated at this nesting level in
+// practice (confirmed against a live payload, 2026-07-09) — use the current
+// entry (CurrentSubLeague == true) in StandingResponse.SubLeagueInfos
+// instead, which is where round numbers actually live.
+type StandingLeagueInfo struct {
+	LeagueID      FlexString `json:"leagueId"`
+	Name          string     `json:"name"`
+	CurrentSeason string     `json:"currentSeason"`
+	Color         string     `json:"color"`
+	ShortName     string     `json:"shortName"`
+}
+
+// StandingTeamInfo is a team roster entry within a standing response — just
+// identity, not a table row (see StandingRow for the per-view rankings).
+type StandingTeamInfo struct {
+	TeamID FlexString `json:"teamId"`
+	Name   string     `json:"name"`
+	Area   int        `json:"area"` // 0:no partition 1:East 2:West
+}
+
+// StandingRow is one team's row in a single standing view (total/half/home/
+// away/homeHalf/awayHalf). Color is an index into the response's
+// LeagueColorInfos (-1 = no promotion/relegation zone); Recent*Result fields
+// are the team's last six results, most recent first (0:win 1:draw 2:lose
+// 3:no match played in that slot yet).
+type StandingRow struct {
+	Rank               int        `json:"rank"`
+	TeamID             FlexString `json:"teamId"`
+	WinRate            float64    `json:"winRate"`
+	DrawRate           float64    `json:"drawRate"`
+	LoseRate           float64    `json:"loseRate"`
+	WinAverage         float64    `json:"winAverage"`
+	LoseAverage        float64    `json:"loseAverage"`
+	Deduction          int        `json:"deduction"`
+	DeductionExplain   string     `json:"deductionExplain"`
+	RecentFirstResult  int        `json:"recentFirstResult"`
+	RecentSecondResult int        `json:"recentSecondResult"`
+	RecentThirdResult  int        `json:"recentThirdResult"`
+	RecentFourthResult int        `json:"recentFourthResult"`
+	RecentFifthResult  int        `json:"recentFifthResult"`
+	RecentSixthResult  int        `json:"recentSixthResult"`
+	Color              int        `json:"color"`
+	Red                int        `json:"red"`
+	TotalCount         int        `json:"totalCount"`
+	WinCount           int        `json:"winCount"`
+	DrawCount          int        `json:"drawCount"`
+	LoseCount          int        `json:"loseCount"`
+	GetScore           int        `json:"getScore"`
+	LoseScore          int        `json:"loseScore"`
+	GoalDifference     int        `json:"goalDifference"`
+	TotalAddScore      int        `json:"totalAddScore"`
+	Integral           int        `json:"integral"` // points
+}
+
+// StandingColorInfo is one promotion/relegation zone entry. StandingRow.Color
+// indexes into the response's LeagueColorInfos slice. LeagueName here is
+// upstream's (slightly misleading) field name for the zone's display label
+// (e.g. "Champions League", "Relegation") — it is not the league's own name.
+type StandingColorInfo struct {
+	Color      string `json:"color"`
+	LeagueName string `json:"leagueName"`
+}
+
+// StandingResponse is the full payload from /football_th/standing/league.aspx.
+// Field placement here (SubLeagueInfos top-level, not nested in LeagueInfo;
+// TeamInfos keyed "teamInfo" singular; no top-level totalRound/currentRound)
+// is confirmed against a live payload (cmd/thscore-smoke, 2026-07-09) and
+// differs from the endpoint's docs summary — trust this over docs.
+type StandingResponse struct {
+	LeagueInfo        StandingLeagueInfo      `json:"leagueInfo"`
+	SubLeagueInfos    []StandingSubLeagueInfo `json:"subLeagueInfos"`
+	TeamInfos         []StandingTeamInfo      `json:"teamInfo"` // note: singular upstream key
+	TotalStandings    []StandingRow           `json:"totalStandings"`
+	HalfStandings     []StandingRow           `json:"halfStandings"`
+	HomeStandings     []StandingRow           `json:"homeStandings"`
+	AwayStandings     []StandingRow           `json:"awayStandings"`
+	HomeHalfStandings []StandingRow           `json:"homeHalfStandings"`
+	AwayHalfStandings []StandingRow           `json:"awayHalfStandings"`
+	LeagueColorInfos  []StandingColorInfo     `json:"leagueColorInfos"`
+	Conference        bool                    `json:"conference"`
+}

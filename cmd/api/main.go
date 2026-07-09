@@ -25,7 +25,7 @@ import (
 )
 
 func main() {
-	once := flag.String("once", "", "run a single sync job (dictionary|logos|schedule|schedule-ahead|schedule-modify|live-snapshot|live-changes|events-stats) and exit")
+	once := flag.String("once", "", "run a single sync job (dictionary|logos|schedule|schedule-ahead|schedule-modify|live-snapshot|live-changes|events-stats|standings|analysis) and exit")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))

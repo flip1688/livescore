@@ -64,8 +64,8 @@ func New(baseURL, apiKey string) *Client {
 			pathLeague:         every(30 * time.Minute),
 			pathTeam:           every(30 * time.Minute),
 			pathCountry:        every(30 * time.Minute),
-			pathStanding:       every(1 * time.Minute), // hard 5s, recommended 1/day
-			pathAnalysis:       every(1 * time.Minute), // hard 1s, recommended 6h; per-match
+			pathStanding:       every(6 * time.Second), // hard 5s, recommended 1/day; sync cadence 6h
+			pathAnalysis:       every(2 * time.Second), // hard 1s, recommended 6h; per-match
 			pathScheduleBasic:  every(60 * time.Second),
 			pathScheduleModify: every(60 * time.Second),
 			// live path — recommended cadences
@@ -242,22 +242,44 @@ func (c *Client) FetchRecentEvents(ctx context.Context) ([]EventsMatch, error) {
 
 // --- Stats ---
 
-// FetchStanding pulls the league table. subLeagueID "" for the default stage.
-// The response shape is complex (six standing views + color zones) and not
-// needed yet, so it is returned raw.
-func (c *Client) FetchStanding(ctx context.Context, leagueID, subLeagueID string) ([]byte, error) {
-	p := url.Values{"leagueId": {leagueID}}
-	if subLeagueID != "" {
-		p.Set("subLeagueId", subLeagueID)
+// FetchLeagueStanding pulls a league's full table (all six standing views).
+// Unlike every other typed endpoint, standing/league.aspx returns the
+// standing object directly with no {"code","message","data"} envelope —
+// confirmed against a production thscore client (ChangPuakk/widgets) and the
+// live payload (cmd/thscore-smoke, 2026-07-09) — so it cannot use the shared
+// fetch[T] helper. A rate-limited response would still carry a top-level
+// "code"/"message" pair, so we peek for that before decoding the direct
+// shape, rather than silently returning a zero-value StandingResponse.
+func (c *Client) FetchLeagueStanding(ctx context.Context, leagueID string) (StandingResponse, error) {
+	body, err := c.get(ctx, pathStanding, url.Values{"leagueId": {leagueID}})
+	if err != nil {
+		return StandingResponse{}, err
 	}
-	return c.get(ctx, pathStanding, p)
+	var probe struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &probe); err == nil && probe.Code != 0 {
+		return StandingResponse{}, fmt.Errorf("thscore: %s: api error (code %d): %s", pathStanding, probe.Code, probe.Message)
+	}
+	var out StandingResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return StandingResponse{}, fmt.Errorf("thscore: %s: decode: %w", pathStanding, err)
+	}
+	return out, nil
 }
 
-// FetchAnalysis pulls H2H/form/goal stats for one match (upstream caches
-// 24h). The response shape is complex and not needed yet, so it is returned
-// raw.
-func (c *Client) FetchAnalysis(ctx context.Context, matchID string) ([]byte, error) {
-	return c.get(ctx, pathAnalysis, url.Values{"matchId": {matchID}})
+// FetchAnalysis pulls H2H/form/goal-distribution/odds stats for one match
+// (upstream caches 24h). The field schema is undocumented and not typed
+// here — confirmed live (2026-07-09) that analysis.aspx uses the standard
+// {"code","message","data"} envelope (unlike standing/league.aspx), with
+// "data" a single object (H2H arrays, form, schedule, odds, ...), so the
+// shared fetch[T] envelope helper applies directly with T = json.RawMessage:
+// it still detects a non-zero envelope code (rate limit/error) the same way
+// as every other typed endpoint, but leaves "data" undecoded so the payload
+// can be stored and re-served byte-for-byte.
+func (c *Client) FetchAnalysis(ctx context.Context, matchID string) (json.RawMessage, error) {
+	return fetch[json.RawMessage](ctx, c, pathAnalysis, url.Values{"matchId": {matchID}})
 }
 
 // FetchLiveStats pulls technical match stats (possession/shots/...). date is

@@ -177,11 +177,19 @@ Response: `leagueInfo` (`leagueId`, `name`, `currentSeason`, `color`, `shortName
 
 ผลนัดล่าสุด: `0`=ชนะ, `1`=เสมอ, `2`=แพ้, `3`=ว่าง · `leagueColorInfos` = โซนเลื่อนชั้น/ตกชั้น + สี
 
+⚠️ **Payload จริงต่างจาก docs (ยืนยัน 2026-07-09 ด้วย `cmd/thscore-smoke -only standing`):**
+- **ไม่มี envelope** `{"code","message","data"}` — คืน object ตรง ๆ (endpoint เดียวที่เป็นแบบนี้) → `FetchLeagueStanding` decode ตรงพร้อม probe `code != 0` กัน rate limit
+- `subLeagueInfos` อยู่ **top-level** ไม่ได้ซ้อนใน `leagueInfo` และ `totalRound`/`currentRound` มีเฉพาะราย entry ใน `subLeagueInfos` (เอาจาก entry ที่ `currentSubLeague == true`)
+- `teamInfo` (เอกพจน์) = roster array (`teamId`, `name`, `area`) แยกจาก 6 มุมมอง standings ซึ่งเป็น key top-level พี่น้องกัน
+- `color` ในแต่ละ row = **index ชี้เข้า `leagueColorInfos`** (`-1` = ไม่มีโซน), `leagueColorInfos[i].leagueName` คือชื่อโซน (เช่น "Relegation") ไม่ใช่ชื่อลีก
+
 ### Matches Analysis — `docs_id=109`
 
 `GET /football_th/analysis.aspx?matchId=...` (`matchId` required)
 
 คืน: H2H ย้อนหลัง ≤20 นัด, ฟอร์ม 20 นัดล่าสุดของทั้งสองทีม, โปรแกรม 5 นัดถัดไป, สถิติ odds (win/loss, over/under, handicap), การกระจายประตูตามช่วงเวลา (ทุก 10 นาที), HT/FT combinations
+
+Payload จริง (ยืนยัน 2026-07-09): มี envelope `{"data": {...}}` ปกติ — `data` เป็น object มี key เช่น `headToHead`, `homeLastMatches`/`awayLastMatches`, `homeSchedule`/`awaySchedule`, `homeOdds`/`awayOdds`, `homeGoals`/`awayGoals`, `homeHT`/`awayHT`, `homeShootTime`/`awayShootTime` โดย**สมาชิกใน array เป็น string คั่น comma (CSV-style) ไม่ใช่ JSON object** → เราเก็บ/เสิร์ฟเป็น blob ดิบ (`json.RawMessage`) ไม่ทำ typed struct
 
 ---
 

@@ -72,9 +72,17 @@ leagues / teams:{leagueId} / matches:{date}   → read cache ของ REST
 | Endpoint | ใช้ทำอะไร |
 |---|---|
 | `GET /v1/matches?date=YYYY-MM-DD` | **Match list รายวัน** (หน้าหลักของเว็บ) — default = วันนี้ |
+| `GET /v1/matches/{id}` | สถานะปัจจุบันของแมตช์เดียว (Redis live state → Mongo) — แหล่งเดียวกับ WS snapshot |
+| `GET /v1/matches/{id}/events` | timeline เหตุการณ์ (ประตู/ใบ/เปลี่ยนตัว) — JSON shape เดียวกับ WS message `events`, ว่าง = `[]` |
+| `GET /v1/matches/{id}/stats` | สถิติเทคนิค (ครองบอล/ยิง) — shape เดียวกับ WS message `stats` |
+| `GET /v1/matches/{id}/analysis` | H2H/ฟอร์ม/odds ก่อนเกม — blob ดิบจาก thscore (prefetch ล่วงหน้า ดูข้อ 4) — 404 ถ้ายังไม่ prefetch |
 | `GET /v1/leagues` | รายชื่อลีกทั้งหมด |
 | `GET /v1/leagues/{id}/teams` | ทีมในลีก |
+| `GET /v1/leagues/{id}/standings` | ตารางคะแนน 6 มุมมอง (total/half/home/away/homeHalf/awayHalf) + โซนเลื่อนชั้น/ตกชั้น |
 | `GET /healthz` | health check |
+
+- Error convention: input ผิด → 400 `{"error": "..."}`, ไม่พบ → 404 `{"error": "not found"}`, อื่น ๆ → 500
+- ทุก endpoint เสิร์ฟจาก Redis → Mongo เท่านั้น (ห้ามทะลุ thscore) — standings sync ทุก 6 ชม. เฉพาะลีกที่มีแมตช์เมื่อวาน/วันนี้/พรุ่งนี้ (evict cache ตอน upsert), analysis **prefetch** ทุก 30 นาทีสำหรับแมตช์ที่จะเตะใน 24 ชม. ข้างหน้า (ข้าม doc ที่ fetch มาแล้ว <24 ชม. เพราะ thscore cache ฝั่งโน้น 24 ชม.) — จงใจไม่ทำ lazy-on-request เพื่อรักษากฎข้อนี้
 
 **กติกาของ match list รายวัน (business rule — ห้ามเปลี่ยนเป็นเที่ยงคืน):**
 - **"matchdate" = 04:00 เวลาไทย → 04:00 ของวันถัดไป** เช่น แมตช์เตะ 08 Jul 2026 03:00 (GMT+7) นับเป็น matchdate **07 Jul 2026** — เพราะบอลยุโรปเตะตี 1–3 ต้องอยู่ในโปรแกรม "เมื่อคืน" ไม่ใช่วันใหม่
