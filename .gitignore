@@ -3,3 +3,4 @@
 *.test
 .DS_Store
 .wrangler/
+.playwright-cli/
