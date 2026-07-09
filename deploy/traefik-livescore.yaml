@@ -1,0 +1,32 @@
+# Traefik dynamic config for the livescore API — drop into
+# /etc/traefik/conf.d/ on the VPS (file provider watches the dir, so it hot
+# reloads; no traefik restart needed).
+#
+# Replace api.YOUR-DOMAIN.com with the real hostname (DNS A record ->
+# 149.28.128.160) before installing. Traefik proxies the /ws WebSocket
+# upgrade natively — no extra config.
+#
+# Follows the conventions of the existing sites.yaml: a `web` router that
+# redirects to https (all-redirect-https middleware is defined in
+# sites.yaml) and a `web-secure` router with the letsencrypt resolver.
+http:
+  routers:
+    livescore-route:
+      entryPoints:
+        - "web"
+      rule: "Host(`api.YOUR-DOMAIN.com`)"
+      service: livescore
+      middlewares:
+        - all-redirect-https
+    livescore-tls-route:
+      entryPoints:
+        - "web-secure"
+      rule: "Host(`api.YOUR-DOMAIN.com`)"
+      service: livescore
+      tls:
+        certResolver: letsencrypt
+  services:
+    livescore:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:8081"
