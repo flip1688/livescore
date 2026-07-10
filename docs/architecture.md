@@ -100,7 +100,7 @@ leagues / teams:{leagueId} / matches:{date}   → read cache ของ REST
 - Message เป็น JSON: `{"channel": "match:123", "type": "score", "data": {...}}` — type: `score | status | card | event | snapshot`
 - Client เพิ่งต่อ → ส่ง snapshot ปัจจุบันจาก Redis ให้ก่อน แล้วค่อยตาม delta (กัน gap)
 - Slow client: buffered channel ต่อ client, เต็มแล้ว drop connection (client reconnect เอง) — ห้าม block hub
-- Auth: ยังไม่ต้อง (เว็บเราเอง) — กันด้วย CORS/origin check พอ
+- Auth: **ตั๋ว HMAC อายุ 60 วิ** (มินต์จาก `/api/ws-token` บน frontend Worker) + origin check + เพดาน connection ต่อ IP — รายละเอียด/runbook ใน [ws-token-auth.md](ws-token-auth.md)
 
 ## 7. Deployment (VPS, systemd — ตัดสินใจ 2026-07-09 ไม่ใช้ Docker)
 
