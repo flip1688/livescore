@@ -50,6 +50,15 @@ type Config struct {
 	// e.g. "https://example.com"). Empty = allow all (dev only).
 	WSAllowedOrigins []string
 
+	// WSTokenSecret verifies the "token" query param on WS upgrades
+	// ("<exp>.<nonce>.<sig>", see internal/ws.HandlerConfig). Empty
+	// disables token checking entirely — the pre-auth rollout behavior.
+	WSTokenSecret string
+
+	// WSMaxConnsPerIP caps concurrent WS connections per client IP.
+	// <= 0 disables the cap.
+	WSMaxConnsPerIP int
+
 	// CORSAllowedOrigins restricts which browser origins get CORS headers on
 	// the REST API (comma-separated, e.g. "https://example.com"). Empty = no
 	// CORS headers at all (same-origin/server-to-server only). "*" allows any
@@ -98,6 +107,8 @@ func Load() (*Config, error) {
 		LogoDNSServer: os.Getenv("LOGO_DNS_SERVER"),
 	}
 	cfg.WSAllowedOrigins = envOriginList("WS_ALLOWED_ORIGINS")
+	cfg.WSTokenSecret = os.Getenv("WS_TOKEN_SECRET")
+	cfg.WSMaxConnsPerIP = envInt("WS_MAX_CONNS_PER_IP", 8)
 	cfg.CORSAllowedOrigins = envOriginList("CORS_ALLOWED_ORIGINS")
 	if cfg.MongoURI == "" {
 		return nil, fmt.Errorf("MONGO_URI is required")

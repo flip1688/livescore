@@ -43,19 +43,26 @@ type Client struct {
 
 	channels map[string]struct{}
 
+	// ip is the client's address as resolved by extractClientIP, set only
+	// when the handler had a per-IP cap enabled for this connection (empty
+	// otherwise). disconnect uses it to release the reservation made by
+	// Hub.tryReserveIP; empty means there is nothing to release.
+	ip string
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
 	closeOnce sync.Once
 }
 
-func newClient(h *Hub, conn *websocket.Conn) *Client {
+func newClient(h *Hub, conn *websocket.Conn, ip string) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Client{
 		hub:      h,
 		conn:     conn,
 		send:     make(chan Message, sendBuffer),
 		channels: make(map[string]struct{}),
+		ip:       ip,
 		ctx:      ctx,
 		cancel:   cancel,
 	}
@@ -83,6 +90,9 @@ func (c *Client) disconnect() {
 		case <-c.hub.done:
 		}
 		c.conn.Close()
+		if c.ip != "" {
+			c.hub.releaseIP(c.ip)
+		}
 	})
 }
 

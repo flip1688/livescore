@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sync"
 )
 
 // Message is the JSON envelope sent to subscribed clients.
@@ -60,6 +61,16 @@ type Hub struct {
 	// done is closed when Run returns, so callers on other goroutines never
 	// block forever trying to hand work to a stopped hub.
 	done chan struct{}
+
+	// ipConns tracks live connection counts per client IP so the HTTP
+	// handler can enforce a per-IP cap *before* upgrading (i.e. before a
+	// Client even exists to go through the registerCh/unregisterCh flow
+	// above). It's guarded by its own mutex rather than routed through
+	// Run's channels because the handler needs a synchronous
+	// check-and-increment from whichever goroutine is serving that
+	// request, and many requests can be in flight concurrently.
+	ipMu    sync.Mutex
+	ipConns map[string]int
 }
 
 // New creates a Hub. Call Run in its own goroutine before serving any
@@ -79,7 +90,39 @@ func New(log *slog.Logger, snapshotFn SnapshotFunc) *Hub {
 		broadcastCh:   make(chan broadcastMsg, 32),
 
 		done: make(chan struct{}),
+
+		ipConns: make(map[string]int),
 	}
+}
+
+// tryReserveIP atomically checks and increments the live connection count
+// for ip, reporting whether ip is under max. max <= 0 disables the cap
+// (always reports true and does not track). Every successful reservation
+// must be paired with exactly one releaseIP call, whether or not the
+// connection ever completes its upgrade.
+func (h *Hub) tryReserveIP(ip string, max int) bool {
+	if max <= 0 {
+		return true
+	}
+	h.ipMu.Lock()
+	defer h.ipMu.Unlock()
+	if h.ipConns[ip] >= max {
+		return false
+	}
+	h.ipConns[ip]++
+	return true
+}
+
+// releaseIP undoes a prior successful tryReserveIP for ip. Safe to call
+// even if ip was never reserved (a no-op).
+func (h *Hub) releaseIP(ip string) {
+	h.ipMu.Lock()
+	defer h.ipMu.Unlock()
+	if h.ipConns[ip] <= 1 {
+		delete(h.ipConns, ip)
+		return
+	}
+	h.ipConns[ip]--
 }
 
 // Run owns the client registry until ctx is done, at which point it closes

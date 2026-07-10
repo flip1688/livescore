@@ -102,7 +102,11 @@ func run(log *slog.Logger, once string) error {
 	}
 
 	root := http.NewServeMux()
-	root.Handle("GET /ws", hub.Handler(cfg.WSAllowedOrigins))
+	root.Handle("GET /ws", hub.Handler(ws.HandlerConfig{
+		AllowedOrigins: cfg.WSAllowedOrigins,
+		TokenSecret:    cfg.WSTokenSecret,
+		MaxConnsPerIP:  cfg.WSMaxConnsPerIP,
+	}))
 	root.Handle("/", handler.New(catalog, log, cfg.CORSAllowedOrigins).Routes())
 
 	srv := &http.Server{

@@ -35,7 +35,7 @@ func newTestHub(t *testing.T, snap SnapshotFunc) (string, *Hub) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go h.Run(ctx)
 
-	srv := httptest.NewServer(h.Handler(nil))
+	srv := httptest.NewServer(h.Handler(HandlerConfig{}))
 	t.Cleanup(func() {
 		srv.Close()
 		cancel()
