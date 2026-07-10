@@ -512,22 +512,56 @@ func (s *Syncer) syncLiveChanges(ctx context.Context) error {
 	return nil
 }
 
-// syncEventsStats pulls the event timeline and technical stats deltas and
-// pushes them to the per-match channels.
+// syncEventsStats pulls full per-match event timelines for UTC today and
+// yesterday and technical stats, pushing changes to the per-match channels.
+//
+// Events used to come from FetchRecentEvents (events.aspx?cmd=new), whose
+// payloads can be PARTIAL for a match — a naive ReplaceMatchEvents on that
+// feed silently dropped previously-stored events (production case: match
+// 2907400 lost all 9 substitution events). FetchDayEvents's per-match lists
+// are always complete, so replacing with them is correct — but it also means
+// every in-play match is returned every cycle, so a digest-based
+// unchanged-skip is required to avoid re-publishing identical events to WS
+// subscribers once a minute. Two dates (not just "today") are fetched
+// because a Thai matchday straddles two UTC calendar dates and a match can
+// finish just after UTC midnight.
 func (s *Syncer) syncEventsStats(ctx context.Context) error {
-	events, err := s.ts.FetchRecentEvents(ctx)
-	if err != nil {
-		return err
+	now := time.Now().UTC()
+	dates := []string{now.AddDate(0, 0, -1).Format("2006-01-02"), now.Format("2006-01-02")}
+
+	byMatch := map[int][]thscore.EventItem{}
+	for _, d := range dates {
+		day, err := s.ts.FetchDayEvents(ctx, d)
+		if err != nil {
+			return err
+		}
+		for _, em := range day {
+			byMatch[em.MatchID] = mergeEvents(byMatch[em.MatchID], em.Events)
+		}
 	}
-	for _, em := range events {
-		id := strconv.Itoa(em.MatchID)
-		if err := s.store.ReplaceMatchEvents(ctx, id, em.Events); err != nil {
+
+	changed, unchanged := 0, 0
+	for matchID, matchEvents := range byMatch {
+		id := strconv.Itoa(matchID)
+		sortEvents(matchEvents)
+
+		current, err := s.store.GetMatchEvents(ctx, id)
+		if err != nil {
+			return err
+		}
+		if eventsDigest(current) == eventsDigest(matchEvents) {
+			unchanged++
+			continue
+		}
+
+		if err := s.store.ReplaceMatchEvents(ctx, id, matchEvents); err != nil {
 			return err
 		}
 		if err := s.cache.Delete(ctx, "events:"+id); err != nil {
 			s.log.Warn("evict events cache", "match_id", id, "err", err)
 		}
-		s.pub.Publish("match:"+id, "events", em)
+		s.pub.Publish("match:"+id, "events", thscore.EventsMatch{MatchID: matchID, Events: matchEvents})
+		changed++
 	}
 
 	stats, err := s.ts.FetchLiveStats(ctx, "")
@@ -545,8 +579,10 @@ func (s *Syncer) syncEventsStats(ctx context.Context) error {
 		s.pub.Publish("match:"+id, "stats", sm)
 	}
 
-	if len(events) > 0 || len(stats) > 0 {
-		s.log.Info("events/stats synced", "event_matches", len(events), "stat_matches", len(stats))
+	if len(byMatch) > 0 || len(stats) > 0 {
+		s.log.Info("events/stats synced",
+			"event_matches", len(byMatch), "changed", changed, "unchanged", unchanged,
+			"stat_matches", len(stats))
 	}
 	return nil
 }

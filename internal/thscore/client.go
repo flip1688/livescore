@@ -72,8 +72,11 @@ func New(baseURL, apiKey string) *Client {
 			// live path — recommended cadences
 			pathLivescores:  every(1 * time.Minute),
 			pathLiveChanges: every(5 * time.Second),
-			pathEvents:      every(1 * time.Minute),
-			pathStats:       every(1 * time.Minute), // hard 10s (recommended)
+			// hard limit 10s/call; syncEventsStats fetches two dates (UTC
+			// today + yesterday) per 1-minute cycle, so 12s comfortably fits
+			// both calls inside the cycle while staying above the hard limit.
+			pathEvents: every(12 * time.Second),
+			pathStats:  every(1 * time.Minute), // hard 10s (recommended)
 			// no Fetch* methods yet — limiters reserved for when we add them
 			pathCorner:  every(1 * time.Minute),
 			pathLineups: every(1 * time.Minute),
@@ -274,8 +277,22 @@ func (c *Client) FetchLiveChanges(ctx context.Context) ([]LivescoreChange, error
 }
 
 // FetchRecentEvents pulls match events updated in the last 3 minutes.
+//
+// Its payloads can be PARTIAL for a match (a subset of that match's events,
+// e.g. omitting substitutions) — confirmed against production data (match
+// 2907400 lost 9 substitution events to a naive replace on this payload).
+// Kept only because it's harmless to call; syncEventsStats uses
+// FetchDayEvents instead, whose per-match lists are always complete.
 func (c *Client) FetchRecentEvents(ctx context.Context) ([]EventsMatch, error) {
 	return fetch[[]EventsMatch](ctx, c, pathEvents, url.Values{"cmd": {"new"}})
+}
+
+// FetchDayEvents pulls the full per-match event list for every match on the
+// given date (yyyy-MM-dd), i.e. events.aspx WITHOUT cmd=new. Unlike
+// FetchRecentEvents, each match's events[] here is the complete timeline, so
+// it's safe to replace-store directly.
+func (c *Client) FetchDayEvents(ctx context.Context, date string) ([]EventsMatch, error) {
+	return fetch[[]EventsMatch](ctx, c, pathEvents, url.Values{"date": {date}})
 }
 
 // --- Stats ---
