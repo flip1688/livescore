@@ -24,7 +24,7 @@ func matchFromLivescore(m thscore.LivescoreMatch, now time.Time) (model.Match, e
 		}
 	}
 
-	return model.Match{
+	out := model.Match{
 		ID:              strconv.Itoa(m.MatchID),
 		LeagueID:        strconv.Itoa(m.LeagueID),
 		LeagueName:      m.LeagueName,
@@ -52,7 +52,32 @@ func matchFromLivescore(m thscore.LivescoreMatch, now time.Time) (model.Match, e
 		HomeCorner:      m.HomeCorner,
 		AwayCorner:      m.AwayCorner,
 		UpdatedAt:       now,
-	}, nil
+	}
+	applyExtra(&out, m.ExtraExplain)
+	return out, nil
+}
+
+// applyExtra maps thscore's extraExplain onto the match and promotes the main
+// score to the ET-inclusive aggregate. thscore freezes homeScore/awayScore at
+// the 90-minute score once extra time starts (confirmed 2026-07-12, World Cup
+// QFs) — without this every knockout match past 90' shows a stale score.
+// Penalty shootout goals stay out of the main score.
+func applyExtra(m *model.Match, e thscore.ExtraExplain) {
+	if !e.HasDetail() {
+		return
+	}
+	m.Extra = &model.MatchExtra{
+		StatusCode:   e.ExtraTimeStatus,
+		FTHomeScore:  e.HomeScore,
+		FTAwayScore:  e.AwayScore,
+		PenHomeScore: e.PenHomeScore,
+		PenAwayScore: e.PenAwayScore,
+		Winner:       e.Winner,
+	}
+	if e.ExtraHomeScore > 0 || e.ExtraAwayScore > 0 {
+		m.HomeScore = e.ExtraHomeScore
+		m.AwayScore = e.ExtraAwayScore
+	}
 }
 
 // applyChange merges a livescores/changes delta onto the previous state of a
@@ -73,6 +98,25 @@ func applyChange(prev model.Match, ch thscore.LivescoreChange, now time.Time) mo
 	m.HomeCorner = ch.HomeCorner
 	m.AwayCorner = ch.AwayCorner
 	m.InjuryTime = ch.InjuryTime
+	m.Extra = nil
+	if ch.ExtraExplain.HasDetail() || ch.Winner != 0 {
+		e := ch.ExtraExplain
+		if e.Winner == 0 {
+			e.Winner = ch.Winner
+		}
+		applyExtra(&m, e)
+	} else if prev.Extra != nil {
+		// The delta feed populates only changed fields; a row for a match
+		// already past 90' can arrive without extraExplain. Keep the knockout
+		// detail and the ET-inclusive score from prev rather than snapping
+		// back to the frozen 90-minute score (the 1-minute snapshot loop
+		// re-hydrates the authoritative state either way).
+		m.Extra = prev.Extra
+		if prev.HomeScore >= ch.HomeScore && prev.AwayScore >= ch.AwayScore {
+			m.HomeScore = prev.HomeScore
+			m.AwayScore = prev.AwayScore
+		}
+	}
 	if hs, ok := thscore.ParseTimeAny(ch.StartTime); ok {
 		m.HalfStartAt = hs
 	}

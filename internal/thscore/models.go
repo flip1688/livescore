@@ -29,6 +29,48 @@ func (f *FlexString) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// ExtraExplain carries knockout-tie detail: extra time, penalty shootouts and
+// two-legged aggregates. Once a match enters extra time the top-level
+// homeScore/awayScore freeze at the 90-minute score — the live score only
+// moves in here (ExtraHomeScore/ExtraAwayScore are the ET-inclusive
+// aggregate; confirmed against a live World Cup QF payload, 2026-07-12).
+// Rows without knockout detail send "" or omit the field, hence the tolerant
+// unmarshaler.
+type ExtraExplain struct {
+	KickOff            int `json:"kickOff"` // 1:Home kicks off first 2:Away
+	Minute             int `json:"minute"`
+	HomeScore          int `json:"homeScore"` // score after 90 minutes
+	AwayScore          int `json:"awayScore"`
+	ExtraTimeStatus    int `json:"extraTimeStatus"` // 1:ET ended 2:ET ended (special) 3:in ET
+	ExtraHomeScore     int `json:"extraHomeScore"`  // aggregate incl. extra time
+	ExtraAwayScore     int `json:"extraAwayScore"`
+	PenHomeScore       int `json:"penHomeScore"`
+	PenAwayScore       int `json:"penAwayScore"`
+	TwoRoundsHomeScore int `json:"twoRoundsHomeScore"`
+	TwoRoundsAwayScore int `json:"twoRoundsAwayScore"`
+	Winner             int `json:"winner"` // 1:Home 2:Away
+}
+
+func (e *ExtraExplain) UnmarshalJSON(b []byte) error {
+	if len(b) == 0 || string(b) == "null" || b[0] == '"' {
+		*e = ExtraExplain{}
+		return nil
+	}
+	type plain ExtraExplain
+	var p plain
+	if err := json.Unmarshal(b, &p); err != nil {
+		return err
+	}
+	*e = ExtraExplain(p)
+	return nil
+}
+
+// HasDetail reports whether the payload carried any knockout-tie information
+// at all (a zero value means the row had no extraExplain object).
+func (e ExtraExplain) HasDetail() bool {
+	return e.ExtraTimeStatus != 0 || e.PenHomeScore != 0 || e.PenAwayScore != 0 || e.Winner != 0
+}
+
 // LivescoreMatch represents a single match from /football_th/livescores.aspx,
 // /football_th/schedule/basic.aspx and /football_th/schedule.aspx. The three
 // endpoints share this shape; fields not present on a given endpoint are left
@@ -37,48 +79,48 @@ func (f *FlexString) UnmarshalJSON(b []byte) error {
 // HomeID/AwayID arrive as strings on schedule/basic.aspx but as numbers on
 // livescores.aspx — see FlexString.
 type LivescoreMatch struct {
-	MatchID         int             `json:"matchId"`
-	LeagueType      int             `json:"leagueType"` // 1:League 2:Cup
-	LeagueID        int             `json:"leagueId"`
-	LeagueName      string          `json:"leagueName"`
-	LeagueShortName string          `json:"leagueShortName"`
-	LeagueColor     string          `json:"leagueColor"`
-	SubLeagueID     string          `json:"subLeagueId"`
-	SubLeagueName   string          `json:"subLeagueName"`
-	MatchTime       string          `json:"matchTime"`     // GMT+7, dd-MM-yyyy HH:mm:ss — see ParseMatchTime
-	HalfStartTime   string          `json:"halfStartTime"` // GMT+7, dd-MM-yyyy HH:mm:ss
-	KickOff         int             `json:"kickOff"`       // 1:Home kicks off first 2:Away
-	Status          int             `json:"status"`        // see status.go Status* constants
-	HomeID          FlexString      `json:"homeId"`
-	HomeName        string          `json:"homeName"`
-	AwayID          FlexString      `json:"awayId"`
-	AwayName        string          `json:"awayName"`
-	HomeScore       int             `json:"homeScore"`
-	AwayScore       int             `json:"awayScore"`
-	HomeHalfScore   int             `json:"homeHalfScore"`
-	AwayHalfScore   int             `json:"awayHalfScore"`
-	HomeRed         int             `json:"homeRed"`
-	AwayRed         int             `json:"awayRed"`
-	HomeYellow      int             `json:"homeYellow"`
-	AwayYellow      int             `json:"awayYellow"`
-	HomeCorner      int             `json:"homeCorner"`
-	AwayCorner      int             `json:"awayCorner"`
-	HomeRank        string          `json:"homeRank"`
-	AwayRank        string          `json:"awayRank"`
-	Season          string          `json:"season"`
-	StageID         string          `json:"stageId"`
-	Round           string          `json:"round"`
-	Group           string          `json:"group"`
-	Location        string          `json:"location"`
-	Weather         string          `json:"weather"`
-	Temperature     string          `json:"temperature"`
-	Explain         string          `json:"explain"`
-	ExtraExplain    json.RawMessage `json:"extraExplain"` // extra-time/penalty/two-legs detail; shape not needed yet
-	Minute          int             `json:"minute"`
-	HasLineup       bool            `json:"hasLineup"`
-	Neutral         bool            `json:"neutral"`
-	Var             string          `json:"var"`
-	InjuryTime      int             `json:"injuryTime"`
+	MatchID         int          `json:"matchId"`
+	LeagueType      int          `json:"leagueType"` // 1:League 2:Cup
+	LeagueID        int          `json:"leagueId"`
+	LeagueName      string       `json:"leagueName"`
+	LeagueShortName string       `json:"leagueShortName"`
+	LeagueColor     string       `json:"leagueColor"`
+	SubLeagueID     string       `json:"subLeagueId"`
+	SubLeagueName   string       `json:"subLeagueName"`
+	MatchTime       string       `json:"matchTime"`     // GMT+7, dd-MM-yyyy HH:mm:ss — see ParseMatchTime
+	HalfStartTime   string       `json:"halfStartTime"` // GMT+7, dd-MM-yyyy HH:mm:ss
+	KickOff         int          `json:"kickOff"`       // 1:Home kicks off first 2:Away
+	Status          int          `json:"status"`        // see status.go Status* constants
+	HomeID          FlexString   `json:"homeId"`
+	HomeName        string       `json:"homeName"`
+	AwayID          FlexString   `json:"awayId"`
+	AwayName        string       `json:"awayName"`
+	HomeScore       int          `json:"homeScore"`
+	AwayScore       int          `json:"awayScore"`
+	HomeHalfScore   int          `json:"homeHalfScore"`
+	AwayHalfScore   int          `json:"awayHalfScore"`
+	HomeRed         int          `json:"homeRed"`
+	AwayRed         int          `json:"awayRed"`
+	HomeYellow      int          `json:"homeYellow"`
+	AwayYellow      int          `json:"awayYellow"`
+	HomeCorner      int          `json:"homeCorner"`
+	AwayCorner      int          `json:"awayCorner"`
+	HomeRank        string       `json:"homeRank"`
+	AwayRank        string       `json:"awayRank"`
+	Season          string       `json:"season"`
+	StageID         string       `json:"stageId"`
+	Round           string       `json:"round"`
+	Group           string       `json:"group"`
+	Location        string       `json:"location"`
+	Weather         string       `json:"weather"`
+	Temperature     string       `json:"temperature"`
+	Explain         string       `json:"explain"`
+	ExtraExplain    ExtraExplain `json:"extraExplain"` // extra-time/penalty/two-legs detail
+	Minute          int          `json:"minute"`
+	HasLineup       bool         `json:"hasLineup"`
+	Neutral         bool         `json:"neutral"`
+	Var             string       `json:"var"`
+	InjuryTime      int          `json:"injuryTime"`
 }
 
 // LivescoreChange represents a single match update from
@@ -89,26 +131,26 @@ type LivescoreMatch struct {
 // but live payloads (2026-07-08) send "dd-MM-yyyy HH:mm:ss" GMT+7 strings —
 // parse with ParseTimeAny, which accepts all three encodings.
 type LivescoreChange struct {
-	MatchID       int             `json:"matchId"`
-	MatchTime     any             `json:"matchTime"` // GMT+7; unix number/string or dd-MM-yyyy HH:mm:ss
-	StartTime     any             `json:"startTime"` // kick-off of the current half, same encodings
-	Status        int             `json:"status"`
-	HomeScore     int             `json:"homeScore"`
-	AwayScore     int             `json:"awayScore"`
-	HomeHalfScore int             `json:"homeHalfScore"`
-	AwayHalfScore int             `json:"awayHalfScore"`
-	HomeRed       int             `json:"homeRed"`
-	AwayRed       int             `json:"awayRed"`
-	HomeYellow    int             `json:"homeYellow"`
-	AwayYellow    int             `json:"awayYellow"`
-	HomeCorner    int             `json:"homeCorner"`
-	AwayCorner    int             `json:"awayCorner"`
-	HasLineup     bool            `json:"hasLineup"`
-	ExtraExplain  json.RawMessage `json:"extraExplain"`
-	Minute        int             `json:"minute"`
-	Var           string          `json:"var"`
-	InjuryTime    int             `json:"injuryTime"`
-	Winner        int             `json:"winner"` // 1:Home 2:Away
+	MatchID       int          `json:"matchId"`
+	MatchTime     any          `json:"matchTime"` // GMT+7; unix number/string or dd-MM-yyyy HH:mm:ss
+	StartTime     any          `json:"startTime"` // kick-off of the current half, same encodings
+	Status        int          `json:"status"`
+	HomeScore     int          `json:"homeScore"`
+	AwayScore     int          `json:"awayScore"`
+	HomeHalfScore int          `json:"homeHalfScore"`
+	AwayHalfScore int          `json:"awayHalfScore"`
+	HomeRed       int          `json:"homeRed"`
+	AwayRed       int          `json:"awayRed"`
+	HomeYellow    int          `json:"homeYellow"`
+	AwayYellow    int          `json:"awayYellow"`
+	HomeCorner    int          `json:"homeCorner"`
+	AwayCorner    int          `json:"awayCorner"`
+	HasLineup     bool         `json:"hasLineup"`
+	ExtraExplain  ExtraExplain `json:"extraExplain"`
+	Minute        int          `json:"minute"`
+	Var           string       `json:"var"`
+	InjuryTime    int          `json:"injuryTime"`
+	Winner        int          `json:"winner"` // 1:Home 2:Away
 }
 
 // EventItem is a single live event (goal/card/substitution/...) within a

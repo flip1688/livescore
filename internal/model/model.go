@@ -94,7 +94,25 @@ type Match struct {
 	HomeCorner    int `bson:"home_corner,omitempty" json:"home_corner,omitempty"`
 	AwayCorner    int `bson:"away_corner,omitempty" json:"away_corner,omitempty"`
 
+	// Extra is set only for knockout matches that reach extra time or a
+	// penalty shootout. When present, HomeScore/AwayScore above hold the
+	// ET-inclusive aggregate (thscore freezes its top-level score at 90
+	// minutes; the sync worker promotes the aggregate) and the frozen
+	// 90-minute score moves to Extra.FTHomeScore/FTAwayScore. Penalty goals
+	// are never added to the main score.
+	Extra *MatchExtra `bson:"extra,omitempty" json:"extra,omitempty"`
+
 	UpdatedAt time.Time `bson:"updated_at" json:"updated_at"`
+}
+
+// MatchExtra is knockout-tie detail mapped from thscore's extraExplain.
+type MatchExtra struct {
+	StatusCode   int `bson:"status_code" json:"status_code"` // 1:ET ended 2:ET ended (special) 3:in ET
+	FTHomeScore  int `bson:"ft_home_score" json:"ft_home_score"`
+	FTAwayScore  int `bson:"ft_away_score" json:"ft_away_score"`
+	PenHomeScore int `bson:"pen_home_score,omitempty" json:"pen_home_score,omitempty"`
+	PenAwayScore int `bson:"pen_away_score,omitempty" json:"pen_away_score,omitempty"`
+	Winner       int `bson:"winner,omitempty" json:"winner,omitempty"` // 1:Home 2:Away
 }
 
 // MatchEvent is a single in-match event (goal, card, substitution, …).
