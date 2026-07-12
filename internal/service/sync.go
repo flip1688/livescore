@@ -270,11 +270,17 @@ func mirrorAndStamp(ctx context.Context, logos *LogoMirror, kind string, pending
 // the fixture list populated (the "โปรแกรมล่วงหน้า" pages).
 const scheduleAheadDays = 7
 
-// syncSchedule refreshes near-term fixtures hourly. One of our matchdates
-// (04:00→04:00 ICT) spans two thscore calendar dates (thscore's date param is
-// GMT+7, midnight-based), so we always fetch today and tomorrow.
+// syncSchedule refreshes near-term fixtures hourly. thscore's date param is
+// GMT+0, midnight-based — NOT GMT+7 like matchTime (verified 2026-07-12: a
+// match with matchTime "12-07-2026 04:00" GMT+7 sits under date=2026-07-11).
+// Our display day (04:00→04:00 ICT) therefore spans thscore dates yesterday
+// through tomorrow: its 04:00–07:00 ICT slice lives on thscore's *yesterday*,
+// so that date must stay in the hourly window — otherwise those matches stop
+// getting fixture updates at midnight ICT and never receive post-match
+// corrections (e.g. extra-time results landing after the live feed dropped
+// them).
 func (s *Syncer) syncSchedule(ctx context.Context) error {
-	return s.syncScheduleDays(ctx, 0, 1)
+	return s.syncScheduleDays(ctx, -1, 1)
 }
 
 // syncScheduleAhead refreshes the forward window (day +2 .. +scheduleAheadDays)
@@ -286,7 +292,8 @@ func (s *Syncer) syncScheduleAhead(ctx context.Context) error {
 }
 
 // syncScheduleDays fetches and upserts fixtures for thscore dates fromDay
-// through toDay (offsets from today, GMT+7).
+// through toDay (offsets from today's Bangkok calendar date; upstream
+// interprets each date string as a GMT+0 day — see syncSchedule).
 func (s *Syncer) syncScheduleDays(ctx context.Context, fromDay, toDay int) error {
 	now := time.Now()
 	bkkNow := now.In(Bangkok)
