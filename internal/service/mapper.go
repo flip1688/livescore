@@ -99,18 +99,24 @@ func applyChange(prev model.Match, ch thscore.LivescoreChange, now time.Time) mo
 	m.AwayCorner = ch.AwayCorner
 	m.InjuryTime = ch.InjuryTime
 	m.Extra = nil
-	if ch.ExtraExplain.HasDetail() || ch.Winner != 0 {
-		e := ch.ExtraExplain
-		if e.Winner == 0 {
-			e.Winner = ch.Winner
-		}
+	e := ch.ExtraExplain
+	if e.Winner == 0 {
+		e.Winner = ch.Winner
+	}
+	// A delta's extraExplain is trustworthy only when it carries scores.
+	// Rows for long-finished matches re-appear in the feed with a skeletal
+	// extraExplain — winner/status set but every score zeroed (observed
+	// 2026-07-13, World Cup QF the day after) — and must not wipe the real
+	// detail; likewise rows with no extraExplain at all. In both cases keep
+	// prev's knockout detail and ET-inclusive score rather than snapping back
+	// to the frozen 90-minute score (the 1-minute snapshot loop re-hydrates
+	// the authoritative state either way).
+	hasScores := e.ExtraHomeScore != 0 || e.ExtraAwayScore != 0 ||
+		e.PenHomeScore != 0 || e.PenAwayScore != 0
+	switch {
+	case e.HasDetail() && (hasScores || prev.Extra == nil):
 		applyExtra(&m, e)
-	} else if prev.Extra != nil {
-		// The delta feed populates only changed fields; a row for a match
-		// already past 90' can arrive without extraExplain. Keep the knockout
-		// detail and the ET-inclusive score from prev rather than snapping
-		// back to the frozen 90-minute score (the 1-minute snapshot loop
-		// re-hydrates the authoritative state either way).
+	case prev.Extra != nil:
 		m.Extra = prev.Extra
 		if prev.HomeScore >= ch.HomeScore && prev.AwayScore >= ch.AwayScore {
 			m.HomeScore = prev.HomeScore
