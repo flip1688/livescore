@@ -60,15 +60,23 @@ func NewSyncer(ts *thscore.Client, st *store.Store, c *cache.Cache, pub Publishe
 // Run starts all sync loops and blocks until ctx is canceled.
 //
 // live-changes runs every 15s: the delta feed covers the last 20s, so any
-// interval under 20s is gap-free; the 1-minute snapshot heals anything missed.
+// interval under 20s is gap-free; the 2-minute snapshot heals anything missed.
+//
+// The thscore API key is shared with the widgets backend (30s changes,
+// 1-minute livescores/events/stats, plus user-driven proxies on
+// schedule/basic, events, stats, lineups and analysis). Rate limits are
+// enforced per key, so the hard-limited endpoints (livescores/events/stats
+// 10s, schedule/basic 60s, analysis 1s) run here at half the widgets cadence
+// and the hourly schedule pull is pinned to :30 — away from the top of the
+// hour when widgets users open pre-kickoff pages and trigger its proxy.
 func (s *Syncer) Run(ctx context.Context) {
 	go s.loop(ctx, "dictionary", 24*time.Hour, s.syncDictionariesAndLogos)
-	go s.loop(ctx, "schedule", 1*time.Hour, s.syncSchedule)
+	go s.loopAligned(ctx, "schedule", 1*time.Hour, 30*time.Minute, s.syncSchedule)
 	go s.loop(ctx, "schedule-ahead", 24*time.Hour, s.syncScheduleAhead)
 	go s.loop(ctx, "schedule-modify", 30*time.Minute, s.syncScheduleModifications)
-	go s.loop(ctx, "live-snapshot", 1*time.Minute, s.syncLiveSnapshot)
+	go s.loop(ctx, "live-snapshot", 2*time.Minute, s.syncLiveSnapshot)
 	go s.loop(ctx, "live-changes", 15*time.Second, s.syncLiveChanges)
-	go s.loop(ctx, "events-stats", 1*time.Minute, s.syncEventsStats)
+	go s.loop(ctx, "events-stats", 2*time.Minute, s.syncEventsStats)
 	go s.loop(ctx, "standings", 6*time.Hour, s.syncStandings)
 	go s.loop(ctx, "analysis", 30*time.Minute, s.syncAnalysis)
 	<-ctx.Done()
@@ -115,6 +123,38 @@ func (s *Syncer) loop(ctx context.Context, name string, every time.Duration, fn 
 			run()
 		}
 	}
+}
+
+// loopAligned runs fn immediately, then at every wall-clock instant that is
+// `offset` past a multiple of `every` (e.g. every=1h, offset=30m → hh:30),
+// until ctx is canceled. Used to keep a shared-key endpoint away from the
+// times another consumer is most likely to hit it.
+func (s *Syncer) loopAligned(ctx context.Context, name string, every, offset time.Duration, fn func(context.Context) error) {
+	run := func() {
+		if err := fn(ctx); err != nil && ctx.Err() == nil {
+			s.log.Error("sync failed", "job", name, "err", err)
+		}
+	}
+	run()
+	for {
+		next := nextAligned(time.Now(), every, offset)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Until(next)):
+			run()
+		}
+	}
+}
+
+// nextAligned returns the first instant strictly after now that is `offset`
+// past a multiple of `every` (measured from the Unix epoch, UTC).
+func nextAligned(now time.Time, every, offset time.Duration) time.Time {
+	next := now.Truncate(every).Add(offset)
+	for !next.After(now) {
+		next = next.Add(every)
+	}
+	return next
 }
 
 // syncDictionaries refreshes leagues/teams/countries into MongoDB and
@@ -426,7 +466,7 @@ func (s *Syncer) syncScheduleModifications(ctx context.Context) error {
 	return nil
 }
 
-// syncLiveSnapshot re-hydrates the full live state every minute: per-match
+// syncLiveSnapshot re-hydrates the full live state every 2 minutes: per-match
 // Redis keys (WS snapshot source + delta base) and a Mongo upsert so the
 // daily match list carries current scores. It also heals anything the
 // 15-second delta poll missed — including halfStartTime, which the delta feed

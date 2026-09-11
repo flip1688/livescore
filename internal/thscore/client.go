@@ -61,22 +61,26 @@ func New(baseURL, apiKey string) *Client {
 		limiters: map[string]*rate.Limiter{
 			// dictionaries — hard limit 30m–1h/call; we sync these on a
 			// daily cron so a 30m floor here is a safety net, not the pacer
-			pathLeagueBasic:    every(1 * time.Hour),
-			pathLeague:         every(30 * time.Minute),
-			pathTeam:           every(30 * time.Minute),
-			pathCountry:        every(30 * time.Minute),
-			pathStanding:       every(6 * time.Second), // hard 5s, recommended 1/day; sync cadence 6h
-			pathAnalysis:       every(2 * time.Second), // hard 1s, recommended 6h; per-match
+			pathLeagueBasic: every(1 * time.Hour),
+			pathLeague:      every(30 * time.Minute),
+			pathTeam:        every(30 * time.Minute),
+			pathCountry:     every(30 * time.Minute),
+			pathStanding:    every(6 * time.Second), // hard 5s, recommended 1/day; sync cadence 6h
+			// hard 1s; the widgets backend paces its own analysis crawl at 1.1s
+			// on the same key, so 3s keeps the combined rate under 1/s.
+			pathAnalysis:       every(3 * time.Second),
 			pathScheduleBasic:  every(60 * time.Second),
 			pathScheduleModify: every(60 * time.Second),
-			// live path — recommended cadences
-			pathLivescores:  every(1 * time.Minute),
+			// live path — the key is shared with the widgets backend, which
+			// already polls livescores/events/stats once a minute, so we run
+			// the hard-10s endpoints at half its cadence (see Syncer.Run).
+			pathLivescores:  every(1 * time.Minute), // hard 10s; sync cadence 2m
 			pathLiveChanges: every(5 * time.Second),
 			// hard limit 10s/call; syncEventsStats fetches two dates (UTC
-			// today + yesterday) per 1-minute cycle, so 12s comfortably fits
-			// both calls inside the cycle while staying above the hard limit.
-			pathEvents: every(12 * time.Second),
-			pathStats:  every(1 * time.Minute), // hard 10s (recommended)
+			// today + yesterday) per 2-minute cycle, so 25s fits both calls
+			// inside the cycle with room for the widgets poll in between.
+			pathEvents: every(25 * time.Second),
+			pathStats:  every(25 * time.Second), // hard 10s
 			// no Fetch* methods yet — limiters reserved for when we add them
 			pathCorner:  every(1 * time.Minute),
 			pathLineups: every(1 * time.Minute),

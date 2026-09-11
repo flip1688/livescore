@@ -41,8 +41,8 @@
 |---|---|---|---|
 | League, Team, Country | Mongo (คงทน) + Redis cache TTL 6 ชม. | เปลี่ยนแทบไม่เคย, thscore ให้ดึงวันละครั้ง | cron 24 ชม. (`day` param ทำ incremental) |
 | Schedule / ผลบอล | Mongo + Redis cache ต่อวัน (วันนี้ TTL 30 วิ, วันอื่น 10 นาที) | ต้อง query ย้อนหลัง/ล่วงหน้า | วันนี้+พรุ่งนี้ทุก 1 ชม. · ล่วงหน้า +2..+7 วันทุก 24 ชม. (`schedule-ahead`) · `modify.aspx` ทุก 30 นาที (จับแมตช์ถูกลบ/เลื่อน) |
-| Live state (สกอร์/การ์ด/นาที) | Redis key ต่อแมตช์ (สำหรับ WS) + snapshot loop upsert สกอร์ลง Mongo ทุก 1 นาที (ให้ match list สด) | เปลี่ยนทุกวินาที | snapshot 1 นาที + delta ทุก ~5-10 วิ |
-| Events (ประตู/ใบเหลือง) | Mongo + push ผ่าน WS | ต้องเก็บถาวรไว้แสดง timeline | `events.aspx?cmd=new` ทุก 1 นาที |
+| Live state (สกอร์/การ์ด/นาที) | Redis key ต่อแมตช์ (สำหรับ WS) + snapshot loop upsert สกอร์ลง Mongo ทุก 2 นาที (ให้ match list สด) | เปลี่ยนทุกวินาที | snapshot 2 นาที + delta ทุก 15 วิ |
+| Events (ประตู/ใบเหลือง) | Mongo + push ผ่าน WS | ต้องเก็บถาวรไว้แสดง timeline | `events.aspx?cmd=new` ทุก 2 นาที |
 | Standings / Analysis | Mongo + Redis cache | thscore cache 24 ชม. อยู่แล้ว | standings หลังแมตช์จบ / analysis on-demand แบบ lazy + cache |
 
 **Logo mirroring**: thscore ห้าม hotlink โลโก้ทีม/ลีก → dictionary sync เก็บแค่ `logo_source_url` ลง doc (ซ่อนจาก API JSON) แล้ว job `logos` (รันต่อท้าย dictionary ทุก 24 ชม. หรือสั่งมือ `cmd/api -once logos`) เทียบ `logo_url` ที่เก็บไว้กับ `ExpectedURL` (derive แบบ deterministic จาก hash ของ source URL) — doc ไหนไม่ตรงคือ "ค้าง" → ดาวน์โหลดแล้วอัปขึ้น **Cloudflare R2** (8 workers, พลาดรายรูปไม่ล้ม batch แค่ค้างไว้รอบหน้า) แล้ว stamp `logo_url` กลับลง doc ดีไซน์นี้ idempotent + self-heal: โหลดพลาด/source เปลี่ยน/ย้าย `R2_PUBLIC_BASE_URL` (เช่นผูก custom domain) ก็ converge เอง โดยไม่โหลดรูปที่มีใน bucket แล้วซ้ำ; ไม่ตั้ง R2 credentials = ข้าม job นี้ (`internal/storage`, `internal/service/logos.go`)
@@ -59,12 +59,12 @@ leagues / teams:{leagueId} / matches:{date}   → read cache ของ REST
 
 ## 4. Live pipeline (หัวใจของระบบ)
 
-1. **Snapshot loop (ทุก 1 นาที)** — `livescores.aspx` ดึงทุกแมตช์ของวัน เขียนทับ `live:match:*` ทั้งชุด → กัน state drift สะสมจาก delta ที่พลาด
+1. **Snapshot loop (ทุก 2 นาที)** — `livescores.aspx` ดึงทุกแมตช์ของวัน เขียนทับ `live:match:*` ทั้งชุด → กัน state drift สะสมจาก delta ที่พลาด
 2. **Delta loop (ทุก 5-10 วิ)** — `livescores/changes.aspx` คืนเฉพาะแมตช์ที่เปลี่ยนใน 20 วิล่าสุด:
    - เทียบกับ state เดิมใน Redis → คำนวณ diff (สกอร์เปลี่ยน, สถานะเปลี่ยน, ใบแดง ฯลฯ)
    - เขียน state ใหม่ลง Redis
    - publish diff เข้า WS hub → fan-out ให้ client ที่ subscribe
-3. **Events loop (ทุก 1 นาที)** — `events.aspx?cmd=new` เก็บรายละเอียดเหตุการณ์ลง Mongo + push
+3. **Events loop (ทุก 2 นาที)** — `events.aspx?cmd=new` เก็บรายละเอียดเหตุการณ์ลง Mongo + push
 4. **จบแมตช์** (status → -1): persist ผลสุดท้ายลง Mongo, ลบออกจาก `live:index`
 
 ## 5. REST API (สำหรับเว็บของเรา)
@@ -90,7 +90,7 @@ leagues / teams:{leagueId} / matches:{date}   → read cache ของ REST
 - Implementation: sync คำนวณ matchdate จาก kickoff ของแต่ละแมตช์แล้ว**เก็บเป็น field `match_date`** ใน Mongo — query รายวันใช้ field นี้ตรง ๆ ไม่ใช้ time-range (ตามแบบ repo ตัวอย่าง ดู [widgets-repo-analysis.md](widgets-repo-analysis.md))
 - ⚠️ **Timezone ของ thscore ต้องอ้างอิง docs เป็นราย field** — field ที่ docs ระบุ GMT+7 (`matchTime`, `halfStartTime`, `startTime`, `oprTime`, `modifyTime`) ห้าม convert ซ้ำเหมือนเป็น UTC; field ที่ docs ไม่ระบุ timezone ห้ามเดา ต้องเช็คกับ payload จริง; และ "วันนี้" ของ `livescores.aspx` นับตาม GMT+0 (รายละเอียดใน [thscore-api.md](thscore-api.md))
 - ตอบเป็นลิสต์เรียงตามเวลาเตะ โดย**ฝังชื่อลีก/สีลีกไว้ในแต่ละแมตช์** (denormalize ตอน sync) ให้ frontend group ตามลีกได้เลยไม่ต้อง join
-- **ความสดของสกอร์ในลิสต์**: snapshot loop เขียนสกอร์ล่าสุดลง Mongo ทุก 1 นาที + cache ของ "วันนี้" TTL แค่ 30 วิ (วันอื่น 10 นาที) → ลิสต์สดภายใน ~1 นาที ส่วนความสดระดับวินาทีเป็นหน้าที่ WS (ข้อ 6)
+- **ความสดของสกอร์ในลิสต์**: snapshot loop เขียนสกอร์ล่าสุดลง Mongo ทุก 2 นาที + cache ของ "วันนี้" TTL แค่ 30 วิ (วันอื่น 10 นาที) → ลิสต์สดภายใน ~1 นาที ส่วนความสดระดับวินาทีเป็นหน้าที่ WS (ข้อ 6)
 - วันย้อนหลังดูได้เท่าที่เรา sync เก็บไว้ (thscore ย้อนหลังให้แค่ 1 เดือน แต่ของเราสะสมใน Mongo ได้เรื่อย ๆ)
 
 ## 6. WebSocket design
@@ -119,9 +119,9 @@ Mongo = Atlas (นอกเครื่อง) · reverse proxy = caddy/nginx �
 | เหตุการณ์ | ผลกระทบ | การรับมือ |
 |---|---|---|
 | thscore ล่ม/ตอบช้า | ข้อมูลค้าง | API ยังเสิร์ฟจาก Redis/Mongo ได้ปกติ; worker log error แล้ว retry รอบถัดไป (limiter คุมไม่ให้ถล่มซ้ำ) |
-| Redis ล่ม | cache miss + live หาย | REST fallback ไป Mongo (ทำแล้วใน read path); live กลับมาเองใน 1 นาทีหลัง Redis ฟื้น (snapshot loop) |
+| Redis ล่ม | cache miss + live หาย | REST fallback ไป Mongo (ทำแล้วใน read path); live กลับมาเองใน 2 นาทีหลัง Redis ฟื้น (snapshot loop) |
 | app restart | WS หลุดทั้งหมด | client reconnect + ได้ snapshot ใหม่ทันที; Redis/Mongo อยู่นอกโปรเซส ไม่เสียอะไร |
-| Delta พลาด (poll gap > 20 วิ) | สกอร์ค้างชั่วคราว | snapshot loop 1 นาทีเป็น self-healing |
+| Delta พลาด (poll gap > 20 วิ) | สกอร์ค้างชั่วคราว | snapshot loop 2 นาทีเป็น self-healing |
 
 ## 9. Scaling path (เมื่อถึงเวลา ไม่ใช่ตอนนี้)
 
