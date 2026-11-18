@@ -11,12 +11,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/flip1688/livescore/internal/cache"
 	"github.com/flip1688/livescore/internal/config"
 	"github.com/flip1688/livescore/internal/handler"
+	"github.com/flip1688/livescore/internal/lotto"
 	"github.com/flip1688/livescore/internal/service"
 	"github.com/flip1688/livescore/internal/storage"
 	"github.com/flip1688/livescore/internal/store"
@@ -25,7 +27,7 @@ import (
 )
 
 func main() {
-	once := flag.String("once", "", "run a single sync job (dictionary|logos|schedule|schedule-ahead|schedule-modify|live-snapshot|live-changes|events-stats|standings|analysis) and exit")
+	once := flag.String("once", "", "run a single sync job (dictionary|logos|schedule|schedule-ahead|schedule-modify|live-snapshot|live-changes|events-stats|standings|analysis|lotto-markets|lotto-results) and exit")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -51,6 +53,11 @@ func run(log *slog.Logger, once string) error {
 	defer st.Close(context.Background())
 	if err := st.EnsureIndexes(ctx, cfg.MatchRetentionDays, cfg.AnalysisRetentionDays); err != nil {
 		return fmt.Errorf("ensure indexes: %w", err)
+	}
+	if cfg.LottoAPIKey != "" {
+		if err := st.EnsureLottoIndexes(ctx); err != nil {
+			return fmt.Errorf("ensure lotto indexes: %w", err)
+		}
 	}
 
 	c, err := cache.New(ctx, cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
@@ -82,7 +89,29 @@ func run(log *slog.Logger, once string) error {
 		log.Warn("R2 not configured — logo mirroring disabled, storing thscore's source URLs")
 	}
 
+	var lottoSync *service.LottoSyncer
+	if cfg.LottoAPIKey != "" {
+		lottoSync = service.NewLottoSyncer(
+			lotto.New(cfg.LottoBaseURL, cfg.LottoAPIKey, cfg.LottoRPS),
+			st, log, cfg.LottoStaleAfter, 0,
+		)
+	}
+
 	if once != "" {
+		if strings.HasPrefix(once, "lotto-") {
+			if lottoSync == nil {
+				return fmt.Errorf("-once %s requires LOTTO_API_KEY", once)
+			}
+			log.Info("running one-shot lotto sync", "job", once)
+			switch once {
+			case "lotto-markets":
+				return lottoSync.SyncMarkets(ctx)
+			case "lotto-results":
+				return lottoSync.SyncResults(ctx)
+			default:
+				return fmt.Errorf("unknown sync job %q", once)
+			}
+		}
 		if cfg.ThscoreAPIKey == "" {
 			return fmt.Errorf("-once requires THSCORE_API_KEY")
 		}
@@ -101,13 +130,24 @@ func run(log *slog.Logger, once string) error {
 		log.Warn("THSCORE_API_KEY not set — sync worker disabled, serving stored data only")
 	}
 
+	var handlerOpts []handler.Option
+	if lottoSync != nil {
+		go lottoSync.Run(ctx)
+		handlerOpts = append(handlerOpts, handler.WithLotto(
+			service.NewLottoCatalog(st, log), lottoSync, cfg.LottoWebhookSecret))
+		log.Info("lotto sync worker started", "upstream", cfg.LottoBaseURL,
+			"webhook", cfg.LottoWebhookSecret != "")
+	} else {
+		log.Warn("LOTTO_API_KEY not set — lottery endpoints disabled")
+	}
+
 	root := http.NewServeMux()
 	root.Handle("GET /ws", hub.Handler(ws.HandlerConfig{
 		AllowedOrigins: cfg.WSAllowedOrigins,
 		TokenSecret:    cfg.WSTokenSecret,
 		MaxConnsPerIP:  cfg.WSMaxConnsPerIP,
 	}))
-	root.Handle("/", handler.New(catalog, log, cfg.CORSAllowedOrigins).Routes())
+	root.Handle("/", handler.New(catalog, log, cfg.CORSAllowedOrigins, handlerOpts...).Routes())
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
