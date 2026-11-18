@@ -56,9 +56,33 @@ func NewLottoSyncer(c *lotto.Client, st *store.Store, log *slog.Logger, staleAft
 // markets a full sweep costs 162 calls, and the Starter plan allows 5,000
 // per day. Six-hourly leaves the budget ~85% unused for everything else.
 func (s *LottoSyncer) Run(ctx context.Context) {
-	go s.loop(ctx, "lotto-markets", 24*time.Hour, s.SyncMarkets)
+	// SyncResults iterates the markets already in the store, so on a cold
+	// start it has nothing to iterate until SyncMarkets has written them.
+	// Starting both loops together left the first results pass reporting
+	// "markets: 0" and the first draws six hours late; seed the list first.
+	if err := s.SyncMarkets(ctx); err != nil && ctx.Err() == nil {
+		s.log.Error("lotto sync failed", "job", "lotto-markets", "err", err)
+	}
+	go s.loopAfter(ctx, "lotto-markets", 24*time.Hour, s.SyncMarkets)
 	go s.loop(ctx, "lotto-results", 6*time.Hour, s.SyncResults)
 	<-ctx.Done()
+}
+
+// loopAfter is loop without the leading immediate run — for a job that has
+// already been run once by the caller.
+func (s *LottoSyncer) loopAfter(ctx context.Context, name string, every time.Duration, fn func(context.Context) error) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := fn(ctx); err != nil && ctx.Err() == nil {
+				s.log.Error("lotto sync failed", "job", name, "err", err)
+			}
+		}
+	}
 }
 
 func (s *LottoSyncer) loop(ctx context.Context, name string, every time.Duration, fn func(context.Context) error) {
@@ -151,6 +175,14 @@ func (s *LottoSyncer) applyDraws(ctx context.Context, m lotto.Market, raw []lott
 		return 0, errors.New("lotto: draw batch without a market slug")
 	}
 	now := time.Now().UTC()
+	if len(raw) == 0 {
+		// Upstream lists 14 markets it has never fed a single draw. Stamping
+		// them inactive here rather than returning early is what keeps every
+		// market carrying an explicit active flag — otherwise those 14 have
+		// no flag at all, and "inactive" and "never seen" become
+		// indistinguishable in the data.
+		return 0, s.store.SetLottoMarketFreshness(ctx, m.Slug, time.Time{}, false)
+	}
 	draws := make([]model.LottoDraw, 0, len(raw))
 	incomplete := 0
 	for _, d := range raw {
@@ -159,9 +191,6 @@ func (s *LottoSyncer) applyDraws(ctx context.Context, m lotto.Market, raw []lott
 			incomplete++
 		}
 		draws = append(draws, doc)
-	}
-	if len(draws) == 0 {
-		return 0, nil
 	}
 
 	// Decide superseded over the whole batch rather than per draw: the

@@ -139,3 +139,45 @@ func TestDrawDayCrossesMidnightInBangkok(t *testing.T) {
 		t.Fatalf("DrawDay = %q, want 2026-11-19", got.DrawDay)
 	}
 }
+
+func TestFetchRetriesRateLimit(t *testing.T) {
+	// The quota is per account, so a sweep can be pushed over the line by a
+	// process we do not control. One collision must not end the sweep.
+	calls := 0
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Write([]byte(`{"success":false,"error":{"code":"rate_limit_exceeded","message":"เกินขีดจำกัด 60 requests/นาที (รวมทุก key)"}}`))
+			return
+		}
+		w.Write([]byte(historyBody))
+	})
+	// Keep the test fast: the first backoff is 15s in production.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err := c.FetchHistory(ctx, "gov-th", 0)
+	// The call is retried, so it is the deadline — not the API error — that
+	// ends it. Either way it must not come back as a rate-limit failure.
+	if err == nil {
+		t.Fatal("want the context deadline to end the retry")
+	}
+	if IsRateLimited(err) {
+		t.Error("a rate-limited call should be retried, not returned")
+	}
+	if calls != 1 {
+		t.Errorf("upstream called %d times before the backoff, want 1", calls)
+	}
+}
+
+func TestIsRateLimited(t *testing.T) {
+	if !IsRateLimited(&APIError{Code: CodeRateLimited}) {
+		t.Error("should recognize the quota code")
+	}
+	if IsRateLimited(&APIError{Code: CodeInvalidAPIKey}) {
+		t.Error("a bad key is not a quota problem")
+	}
+	if IsRateLimited(errors.New("boom")) {
+		t.Error("a plain error is not a quota problem")
+	}
+}

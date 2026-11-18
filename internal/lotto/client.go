@@ -25,6 +25,7 @@ package lotto
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -81,7 +82,24 @@ func (e *APIError) Error() string {
 const (
 	CodeMissingAPIKey = "missing_api_key"
 	CodeInvalidAPIKey = "invalid_api_key"
+	// CodeRateLimited: "เกินขีดจำกัด 60 requests/นาที (รวมทุก key)". Note
+	// "รวมทุก key" — the quota is per account, not per key, so issuing a
+	// second key buys nothing and any other process on the same account
+	// (a one-shot backfill run next to the live service, say) spends from
+	// the same budget.
+	CodeRateLimited = "rate_limit_exceeded"
 )
+
+// rateLimitRetries is how many times fetch re-tries a rate-limited call
+// before giving up. Upstream's window is a minute, so the backoff below
+// (15s, 30s, 60s) spans one full window.
+const rateLimitRetries = 3
+
+// IsRateLimited reports whether err is upstream's quota rejection.
+func IsRateLimited(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Code == CodeRateLimited
+}
 
 type envelope[T any] struct {
 	Success bool `json:"success"`
@@ -127,7 +145,30 @@ func (c *Client) get(ctx context.Context, path string, params url.Values) ([]byt
 	return body, nil
 }
 
+// fetch performs a rate-limited GET and decodes the envelope's data field.
+//
+// A quota rejection is retried rather than returned: the limit is shared
+// across the whole account, so a sweep of 162 markets can be pushed over the
+// line by something entirely outside this process. Without the retry, one
+// such collision aborts every market after it.
 func fetch[T any](ctx context.Context, c *Client, path string, params url.Values) (T, error) {
+	var zero T
+	backoff := 15 * time.Second
+	for attempt := 0; ; attempt++ {
+		data, err := fetchOnce[T](ctx, c, path, params)
+		if err == nil || !IsRateLimited(err) || attempt >= rateLimitRetries {
+			return data, err
+		}
+		select {
+		case <-ctx.Done():
+			return zero, ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+}
+
+func fetchOnce[T any](ctx context.Context, c *Client, path string, params url.Values) (T, error) {
 	var zero T
 	body, err := c.get(ctx, path, params)
 	if err != nil {
