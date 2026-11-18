@@ -15,13 +15,37 @@ type Handler struct {
 	catalog            *service.Catalog
 	log                *slog.Logger
 	corsAllowedOrigins []string
+
+	// Lottery wiring, attached with WithLotto. All three stay nil when the
+	// lotto feed is not configured, and the routes are simply not registered.
+	lotto              *service.LottoCatalog
+	lottoSync          *service.LottoSyncer
+	lottoWebhookSecret string
+}
+
+// Option customizes a Handler at construction.
+type Option func(*Handler)
+
+// WithLotto enables the lottery endpoints. syncer and secret may both be
+// zero to serve reads without accepting webhooks — useful on a read-only
+// replica of the API.
+func WithLotto(cat *service.LottoCatalog, syncer *service.LottoSyncer, webhookSecret string) Option {
+	return func(h *Handler) {
+		h.lotto = cat
+		h.lottoSync = syncer
+		h.lottoWebhookSecret = webhookSecret
+	}
 }
 
 // corsAllowedOrigins restricts which browser origins get CORS headers
 // (comma-separated allowlist, "*" = any origin); empty disables CORS
 // entirely. See internal/config for how it's parsed from env.
-func New(catalog *service.Catalog, log *slog.Logger, corsAllowedOrigins []string) *Handler {
-	return &Handler{catalog: catalog, log: log, corsAllowedOrigins: corsAllowedOrigins}
+func New(catalog *service.Catalog, log *slog.Logger, corsAllowedOrigins []string, opts ...Option) *Handler {
+	h := &Handler{catalog: catalog, log: log, corsAllowedOrigins: corsAllowedOrigins}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 func (h *Handler) Routes() http.Handler {
@@ -35,6 +59,9 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /v1/matches/{matchID}/events", h.listMatchEvents)
 	mux.HandleFunc("GET /v1/matches/{matchID}/stats", h.listMatchStats)
 	mux.HandleFunc("GET /v1/matches/{matchID}/analysis", h.getMatchAnalysis)
+	if h.lotto != nil {
+		h.lottoRoutes(mux)
+	}
 	return corsMiddleware(h.corsAllowedOrigins, mux)
 }
 

@@ -37,6 +37,45 @@ Backend feed ข้อมูล/สถิติ/วิเคราะห์ฟ�
 - ⚠️ **`THSCORE_API_KEY` ใช้ร่วมกับ repo widgets (production)** — rate limit นับต่อ key จึงต้องบวกโหลดของ widgets เสมอ (changes 30 วิ, livescores/events/stats 1 นาที, proxy ตาม user บน schedule/basic, events, stats, lineups, analysis) → endpoint ที่ hard limit เป็นวินาทีฝั่งเราวิ่งครึ่งความถี่ของ widgets, schedule รายชั่วโมง pin ที่ hh:30 (`loopAligned`), analysis limiter 3 วิ (2026-09-11) — ทางแก้ถาวรคือขอ key แยกต่อ product
 - Data retention: MongoDB TTL index ลบอัตโนมัติ — `matches` (บน `kickoff_at`) และ `match_events`/`match_stats` (บน `updated_at`) หมดอายุตาม `MATCH_RETENTION_DAYS` (default 30 วัน) ส่วน `match_analysis` (บน `fetched_at`, blob ใหญ่สุด ~16KB/แมตช์ ใช้ไม่ได้แล้วหลังจบเกม) แยกอายุสั้นกว่าด้วย `ANALYSIS_RETENTION_DAYS` (default 7 วัน) — ค่า <= 0 = ปิด TTL ของ collection นั้น; `standings`/`leagues`/`teams`/`countries` ไม่หมดอายุ; สร้าง/อัปเดตใน `Store.EnsureIndexes` (`internal/store/mongo.go`)
 
+## หวย (lotto2news) — เพิ่ม 19 พ.ย. 2026
+
+feed ที่ 2 ของ repo นี้ คนละเจ้ากับ thscore `internal/lotto` คือที่เดียวที่คุยกับมัน
+(กติกาเดียวกับ thscore: **ห้าม request จาก user ทะลุถึงต้นทาง**) เปิดใช้ด้วย `LOTTO_API_KEY`
+ถ้าไม่ตั้งค่า = ปิดทั้งระบบ ไม่มี sync loop ไม่มี REST route
+
+| | |
+|---|---|
+| collection | `lotto_markets` (_id = slug) · `lotto_draws` (_id = drawId) |
+| sync | webhook (ทันที) + sweep ทุก 6 ชม. (162 ตลาด = 162 calls) |
+| job เดี่ยว | `-once lotto-markets` / `-once lotto-results` |
+| REST | `/v1/lotto/{markets,latest,day/{day},markets/{slug},markets/{slug}/history}` |
+| webhook | `POST /v1/lotto/webhook` ตรวจ `X-Webhook-Secret` |
+
+**เอกสารของผู้ให้บริการเชื่อไม่ได้ ให้ยึด `internal/lotto/client.go`** — เขียนไว้ว่า history คืน
+array ที่ `data` (จริงคือ `data.results`), ตัวอย่าง webhook ใช้ `slug:"gov"` `category:"thai"`
+`tier:"main"` ซึ่ง**ไม่มีสักค่าในระบบจริง** (ของจริงคือ `gov-th`/`gov`/`normal`) ·
+`limit` เพดาน 100 · `to` เป็น exclusive · `/api/v1/result` คืนแค่ตลาดที่เพิ่ง publish ไม่กี่ตัว
+ไม่ใช่ทุกตลาด · `/api/v1/result/gov-th` คืน `latest:null` ทั้งที่ history มีงวดอยู่
+
+กับดักข้อมูล 3 ข้อที่โค้ดจัดการไว้แล้ว **อย่ารื้อ**:
+
+1. **ต้นทางส่งงวดซ้ำ** คนละ `drawId` (งวด 16 ก.ค. 2026 ของ `gov-th` เป็นทั้ง 525 และ 689)
+   → **ห้ามทำ unique index บน `(slug, draw_day)`** ใช้ flag `superseded` เลือกตัวที่
+   `published_at` ใหม่กว่า (`model.MarkSuperseded`)
+2. **งวดเก่าของหวยรัฐบาลมีแต่รางวัลที่ 1** (ครบจริง 11 จาก 26 งวด) → เก็บลง DB แต่ซ่อนจาก
+   read path ด้วย flag `complete`
+3. **14 ตลาดไม่เคยมีงวดเลย + หุ้นไทยเที่ยงตายตั้งแต่ มิ.ย. 2026** ต้นทางไม่มี flag บอก →
+   `active` คำนวณจากความสดของงวด (`LOTTO_STALE_AFTER` default 30 วัน)
+
+> `gov-gsb`/`gov-baac` อยู่ category `gov` เหมือน `gov-th` แต่ใช้ชนิดรางวัลคนละชุด
+> (`ticket/3up/2down` vs `first/front3/last3/last2`) — **ตัดสินใจจาก slug ห้ามใช้ category**
+
+⚠️ **โควตานับรวมทั้ง account ไม่ใช่ต่อ key** (error บอกเอง "รวมทุก key") — รัน `-once` ตอน
+service วิ่งอยู่ = ยิงซ้อนกันทะลุ 60/นาที client retry ให้แล้วแต่อย่าทำโดยไม่จำเป็น
+
+`lotto_draws` **ไม่มี TTL** ต่างจาก `matches` เพราะต้นทางเก็บย้อนหลังแค่ ~100 งวดต่อตลาด
+อะไรที่ลบไปคือหายถาวร
+
 ## Repo ตัวอย่างสำหรับอ้างอิง (อยู่นอก repo นี้ ในเครื่อง dev)
 
 - Backend: `~/go/src/github.com/ChangPuakk/widgets` — production ที่ใช้ thscore จริง (หลาย provider; ของเรา thscore เจ้าเดียว ตัดชั้น mapping ทิ้ง)

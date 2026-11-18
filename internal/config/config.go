@@ -74,6 +74,22 @@ type Config struct {
 	R2Bucket          string
 	R2PublicBaseURL   string
 
+	// lotto2news upstream (lottery results). LottoAPIKey empty = the whole
+	// lotto subsystem is off: no sync loops, no REST routes, no webhook.
+	LottoBaseURL string
+	LottoAPIKey  string
+	// LottoRPS caps outbound calls. The Starter plan allows 60/min; the
+	// default leaves headroom for the account's other consumers.
+	LottoRPS float64
+	// LottoWebhookSecret is compared against the X-Webhook-Secret header on
+	// POST /v1/lotto/webhook. Empty disables the webhook endpoint outright —
+	// upstream signs nothing, so without a secret the endpoint would let
+	// anyone write into our results collection.
+	LottoWebhookSecret string
+	// LottoStaleAfter decides which markets count as live. Upstream lists
+	// markets it no longer feeds and flags none of them.
+	LottoStaleAfter time.Duration
+
 	// LogoDNSServer ("host:port") routes logo-CDN DNS lookups through a
 	// specific resolver — some ISPs (notably Thai ones) poison titan007.com
 	// at DNS level. Empty = system resolver.
@@ -105,6 +121,12 @@ func Load() (*Config, error) {
 		R2PublicBaseURL:   os.Getenv("R2_PUBLIC_BASE_URL"),
 
 		LogoDNSServer: os.Getenv("LOGO_DNS_SERVER"),
+
+		LottoBaseURL:       envStr("LOTTO_BASE_URL", "https://lotto2news.com"),
+		LottoAPIKey:        os.Getenv("LOTTO_API_KEY"),
+		LottoRPS:           envFloat("LOTTO_RPS", 0.9),
+		LottoWebhookSecret: os.Getenv("LOTTO_WEBHOOK_SECRET"),
+		LottoStaleAfter:    envDuration("LOTTO_STALE_AFTER", 30*24*time.Hour),
 	}
 	cfg.WSAllowedOrigins = envOriginList("WS_ALLOWED_ORIGINS")
 	cfg.WSTokenSecret = os.Getenv("WS_TOKEN_SECRET")
