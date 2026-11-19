@@ -76,6 +76,68 @@ service วิ่งอยู่ = ยิงซ้อนกันทะลุ 60
 `lotto_draws` **ไม่มี TTL** ต่างจาก `matches` เพราะต้นทางเก็บย้อนหลังแค่ ~100 งวดต่อตลาด
 อะไรที่ลบไปคือหายถาวร
 
+## lnwthailive — feed ที่กำลังประเมินแข่งกับ thscore (เพิ่ม 19 พ.ย. 2026)
+
+feed ที่ 3 ของ repo **ยังไม่ได้ใช้งานจริง** ใส่ไว้เพื่อเก็บข้อมูลมาเทียบว่าควรย้ายจาก thscore ไหม
+`internal/lnw` คือที่เดียวที่คุยกับมัน เปิดด้วย `LNW_API_KEY` ไม่ตั้ง = ปิดสนิท (default คือปิด)
+
+| | |
+|---|---|
+| collection | `lnw_matches` · `lnw_results` · `lnw_standings` · `lnw_analysis` · `lnw_match_links` · `lnw_coverage` |
+| job เดี่ยว | `-once lnw-verify\|lnw-matches\|lnw-results\|lnw-standings\|lnw-analysis\|lnw-coverage` |
+| REST | **ไม่มี** — เป็นงานเก็บข้อมูลเปรียบเทียบล้วนๆ ไม่มี route สาธารณะ |
+| cadence | matches 60s · results 2m · standings 10m · analysis 15m · coverage 1h |
+
+**ห้ามให้มันเขียนทับ collection ของ thscore เด็ดขาด** (`matches`, `teams`, `leagues`,
+`standings`, `match_analysis`) ทุกอย่าง prefix `lnw_` — ถ้าสองเจ้าทับกันได้ การเปรียบเทียบก็
+ไม่มีความหมาย และการเลิกใช้ทำได้ด้วยการ drop 6 collection นี้ทิ้งเฉยๆ
+
+### เรื่องใหญ่ที่สุด: มันคือ aggregator ของ 4 ต้นน้ำที่ id ไม่ตรงกันเลย
+
+```
+/api/public/matches    id "rb_4344928"   โลโก้ logos1.tcpwe138stya.ru
+/api/public/results    id 19893334 int   โลโก้ cdn.sportmonks.com
+/api/public/standings  ไม่มี id เลย       โลโก้ 365scores (base64 ห่อใน /api/imgproxy)
+/api/analyse/*         id 342830 int     มี league/team/season id ชุดของตัวเอง
+```
+
+ต่างจาก thscore ที่ทุกอย่างแขวนบน match id เดียว **ที่นี่ join ด้วย key ไม่ได้ ต้องเดาจากชื่อทีม
++ เวลาแข่ง** → `internal/service/lnw_link.go` ทำ crosswalk เก็บลง `lnw_match_links` พร้อม
+`method` + `confidence` เสมอ **ห้ามเอา id ที่เดาได้ไปเขียนกลับลง document ของ feed**
+
+แถมชื่อทีมคนละภาษา: matches/standings เป็นไทย แต่ **results เป็นอังกฤษล้วน** → สองอันนี้
+จับคู่ด้วยชื่อไม่ได้เลย เหลือแค่เวลา และผูกให้เฉพาะตอนมีผู้สมัครเดียวในหน้าต่าง 90 นาที
+(`linkResultsByTime`) ถ้ากำกวม = ปล่อยไม่ผูก แล้วรายงานเป็นตัวเลขใน `lnw_coverage`
+
+### กับดักของ feed นี้ (โค้ดจัดการแล้ว อย่ารื้อ)
+
+1. **`/api/public/matches` ไม่มีวันที่** มีแค่ `day:"today"|"tomorrow"` + `time:"20:00"`
+   → ต้อง resolve ด้วยนาฬิกา ณ ตอน fetch (`lnw.ResolveKickoff`, `SyncMatches` จับเวลาไว้
+   ครั้งเดียวแล้วส่งต่อ) **เก็บดิบไว้แปลงทีหลัง = ผิดวัน** เก็บ `raw_day`/`raw_time` ไว้ตรวจย้อน
+2. **feed นี้ไม่มีประวัติย้อนหลัง** คืนแค่วันนี้+พรุ่งนี้ ย้อนหลังต้องไป `/api/public/results?date=`
+   ซึ่งเป็น id space คนละชุด
+3. **URL สตรีมมี token อายุสั้น** เอกสารเขาเขียนเอง "ห้ามแคชเกิน 15 วิ" → **ไม่เก็บลง Mongo**
+   เก็บแค่รายชื่อช่อง (`model.LnwChannel` ไม่มีฟิลด์ URL)
+4. **สกอร์ก่อนแข่งเป็นสตริง `"vs"`** → `ParseScore` คืน `ok=false` ใช้ `HasScore` แยก 0-0 จริง
+   ออกจาก "ยังไม่เริ่ม" **ห้ามอ่านค่า 0 เปล่าๆ**
+5. **standings ไม่มี league id** ใช้ anchor จาก `leagueUrl` (`/standings#epl` → `epl`)
+   เป็น `_id` ถ้าไม่มี anchor = ข้ามทิ้ง ไม่ key ด้วยชื่อที่เขาเปลี่ยนคำได้
+6. **status คนละชุดกันทั้ง 3 feed** (`"30'"/"HT"/"รอแข่ง"` · `NS/INPLAY_1ST_HALF/FT_PEN` ·
+   `FULL_TIME`) → normalize แยกกัน 3 ฟังก์ชัน และเก็บค่าดิบไว้ทุกครั้ง
+
+> `match_date` ใช้เส้นตัด 04:00 ICT เดียวกับฝั่ง thscore (`MatchDateFor`) **จงใจ** เพื่อให้
+> นับเทียบกันวันต่อวันได้ตรงๆ
+
+### เอกสารของเขาขัดกันเอง — อย่าเชื่อ ให้ยึด `internal/lnw/client.go`
+
+ราคา: หน้า demo บอก Starter ฿500/สัปดาห์, Pro ฿3,500/เดือน · `llms.txt` บอก Starter
+฿4,500/เดือน, Pro ฿6,500/เดือน · rate limit: 10/min vs 60/min vs 1,000/min สำหรับ tier เดียวกัน
+→ `LNW_RPS` default **0.13 (~8/นาที)** คือสมมติว่าได้น้อยที่สุด ยิง `-once lnw-verify`
+(`/api/portal/verify`) เพื่อดูค่าจริงจาก account ก่อนปรับ cadence
+
+⚠️ token ในช่อง playground หน้าเว็บ (ฟิลด์ `initialCsrf`) **ไม่ใช่ API key** — เป็น session token
+เซ็น HMAC มีวันหมดอายุ ใช้ทำ sync ไม่ได้ · ตอนประเมิน sandbox ของเขาเองก็ใช้งานไม่ได้
+
 ## Repo ตัวอย่างสำหรับอ้างอิง (อยู่นอก repo นี้ ในเครื่อง dev)
 
 - Backend: `~/go/src/github.com/ChangPuakk/widgets` — production ที่ใช้ thscore จริง (หลาย provider; ของเรา thscore เจ้าเดียว ตัดชั้น mapping ทิ้ง)

@@ -18,6 +18,7 @@ import (
 	"github.com/flip1688/livescore/internal/cache"
 	"github.com/flip1688/livescore/internal/config"
 	"github.com/flip1688/livescore/internal/handler"
+	"github.com/flip1688/livescore/internal/lnw"
 	"github.com/flip1688/livescore/internal/lotto"
 	"github.com/flip1688/livescore/internal/service"
 	"github.com/flip1688/livescore/internal/storage"
@@ -27,7 +28,7 @@ import (
 )
 
 func main() {
-	once := flag.String("once", "", "run a single sync job (dictionary|logos|schedule|schedule-ahead|schedule-modify|live-snapshot|live-changes|events-stats|standings|analysis|lotto-markets|lotto-results) and exit")
+	once := flag.String("once", "", "run a single sync job (dictionary|logos|schedule|schedule-ahead|schedule-modify|live-snapshot|live-changes|events-stats|standings|analysis|lotto-markets|lotto-results|lnw-verify|lnw-matches|lnw-results|lnw-standings|lnw-analysis|lnw-coverage) and exit")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -53,6 +54,11 @@ func run(log *slog.Logger, once string) error {
 	defer st.Close(context.Background())
 	if err := st.EnsureIndexes(ctx, cfg.MatchRetentionDays, cfg.AnalysisRetentionDays); err != nil {
 		return fmt.Errorf("ensure indexes: %w", err)
+	}
+	if cfg.LnwAPIKey != "" {
+		if err := st.EnsureLnwIndexes(ctx); err != nil {
+			return fmt.Errorf("ensure lnw indexes: %w", err)
+		}
 	}
 	if cfg.LottoAPIKey != "" {
 		if err := st.EnsureLottoIndexes(ctx); err != nil {
@@ -97,7 +103,22 @@ func run(log *slog.Logger, once string) error {
 		)
 	}
 
+	var lnwSync *service.LnwSyncer
+	if cfg.LnwAPIKey != "" {
+		lnwSync = service.NewLnwSyncer(
+			lnw.New(cfg.LnwBaseURL, cfg.LnwAPIKey, cfg.LnwRPS),
+			st, log, cfg.LnwSports,
+		)
+	}
+
 	if once != "" {
+		if strings.HasPrefix(once, "lnw-") {
+			if lnwSync == nil {
+				return fmt.Errorf("-once %s requires LNW_API_KEY", once)
+			}
+			log.Info("running one-shot lnw sync", "job", once)
+			return lnwSync.RunOnce(ctx, once)
+		}
 		if strings.HasPrefix(once, "lotto-") {
 			if lottoSync == nil {
 				return fmt.Errorf("-once %s requires LOTTO_API_KEY", once)
@@ -139,6 +160,15 @@ func run(log *slog.Logger, once string) error {
 			"webhook", cfg.LottoWebhookSecret != "")
 	} else {
 		log.Warn("LOTTO_API_KEY not set — lottery endpoints disabled")
+	}
+
+	// The lnwthailive sync runs purely as an evaluation: it fills its own
+	// lnw_* collections for comparison against thscore and serves no
+	// public route, so there is no handler option to register here.
+	if lnwSync != nil {
+		go lnwSync.Run(ctx)
+		log.Info("lnw evaluation worker started",
+			"upstream", cfg.LnwBaseURL, "sports", cfg.LnwSports)
 	}
 
 	root := http.NewServeMux()
