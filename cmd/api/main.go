@@ -156,6 +156,11 @@ func run(log *slog.Logger, once string) error {
 		go lottoSync.Run(ctx)
 		handlerOpts = append(handlerOpts, handler.WithLotto(
 			service.NewLottoCatalog(st, log), lottoSync, cfg.LottoWebhookSecret))
+	}
+	// The boxing page reads the lnwthailive combat feeds, so its routes
+	// exist only where that feed is configured.
+	if cfg.LnwAPIKey != "" {
+		handlerOpts = append(handlerOpts, handler.WithBoxing(service.NewBoxingCatalog(st, log)))
 		log.Info("lotto sync worker started", "upstream", cfg.LottoBaseURL,
 			"webhook", cfg.LottoWebhookSecret != "")
 	} else {

@@ -21,6 +21,10 @@ type Handler struct {
 	lotto              *service.LottoCatalog
 	lottoSync          *service.LottoSyncer
 	lottoWebhookSecret string
+
+	// boxing is nil unless the lnwthailive feed is configured; its routes
+	// are then simply not registered.
+	boxing *service.BoxingCatalog
 }
 
 // Option customizes a Handler at construction.
@@ -61,6 +65,9 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /v1/matches/{matchID}/analysis", h.getMatchAnalysis)
 	if h.lotto != nil {
 		h.lottoRoutes(mux)
+	}
+	if h.boxing != nil {
+		h.boxingRoutes(mux)
 	}
 	return corsMiddleware(h.corsAllowedOrigins, mux)
 }

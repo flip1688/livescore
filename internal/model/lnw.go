@@ -15,6 +15,12 @@ import "time"
 // is the default and omits the parameter.
 const (
 	LnwSportFootball = "football"
+	// LnwSportFighting is every combat broadcast. Upstream answers to both
+	// ?sport=boxing and ?sport=fighting with the same rows and stamps them
+	// all "fighting", so one constant covers muay thai, kickboxing, boxing
+	// and MMA alike — the discipline, where it can be told at all, has to
+	// be read out of the programme title.
+	LnwSportFighting = "fighting"
 )
 
 // LnwMatch is one row of /api/public/matches: today's and tomorrow's

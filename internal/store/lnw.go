@@ -231,3 +231,20 @@ func (s *Store) UpsertLnwCombatBouts(ctx context.Context, bouts []model.LnwComba
 	return upsertByID(ctx, s.db.Collection(collLnwCombat), bouts,
 		func(b model.LnwCombatBout) string { return b.ID })
 }
+
+// LnwMatchesBySportDate returns one display day's rows for a single sport,
+// sorted by kick-off. The fighting feed is read through this: it shares the
+// fixture collection with football because upstream serves both through
+// /api/public/matches, and only the sport field separates them.
+func (s *Store) LnwMatchesBySportDate(ctx context.Context, sport, matchDate string) ([]model.LnwMatch, error) {
+	filter := bson.M{"sport": sport, "match_date": matchDate}
+	return findAll[model.LnwMatch](ctx, s.db.Collection(collLnwMatches), filter,
+		bson.D{{Key: "kickoff_at", Value: 1}})
+}
+
+// ListLnwBoxingPrograms returns the promotion list, most-populated first so
+// a programme that finally carries a card sorts to the top.
+func (s *Store) ListLnwBoxingPrograms(ctx context.Context) ([]model.LnwBoxingProgram, error) {
+	return findAll[model.LnwBoxingProgram](ctx, s.db.Collection(collLnwBoxing), bson.M{},
+		bson.D{{Key: "total_events", Value: -1}, {Key: "name", Value: 1}})
+}

@@ -152,7 +152,7 @@ func Load() (*Config, error) {
 		// (confirmed by -once lnw-verify, 2026-11-22). See lnw.New.
 		LnwRPS: envFloat("LNW_RPS", 2),
 	}
-	cfg.LnwSports = envCSV("LNW_SPORTS", []string{"football"})
+	cfg.LnwSports = envCSV("LNW_SPORTS", []string{"football", "fighting"})
 	// The vendor's own sports, which thscore has no equivalent of. On by
 	// default: they are the reason this feed is being evaluated at all.
 	cfg.LnwCombat = envCSV("LNW_COMBAT", []string{"boxing", "muay_pakyok", "wuachon"})
