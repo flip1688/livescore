@@ -76,6 +76,147 @@ service วิ่งอยู่ = ยิงซ้อนกันทะลุ 60
 `lotto_draws` **ไม่มี TTL** ต่างจาก `matches` เพราะต้นทางเก็บย้อนหลังแค่ ~100 งวดต่อตลาด
 อะไรที่ลบไปคือหายถาวร
 
+## lnwthailive — feed ที่กำลังประเมินแข่งกับ thscore (เพิ่ม 19 พ.ย. 2026)
+
+feed ที่ 3 ของ repo **ยังไม่ได้ใช้งานจริง** ใส่ไว้เพื่อเก็บข้อมูลมาเทียบว่าควรย้ายจาก thscore ไหม
+`internal/lnw` คือที่เดียวที่คุยกับมัน เปิดด้วย `LNW_API_KEY` ไม่ตั้ง = ปิดสนิท (default คือปิด)
+
+| | |
+|---|---|
+| collection (ฟุตบอล) | `lnw_matches` · `lnw_results` · `lnw_standings` · `lnw_analysis` · `lnw_match_links` · `lnw_coverage` |
+| collection (กีฬาต่อสู้) | `lnw_boxing_programs` · `lnw_combat_bouts` |
+| job เดี่ยว | `-once lnw-verify\|lnw-matches\|lnw-results\|lnw-standings\|lnw-analysis\|lnw-coverage\|lnw-boxing\|lnw-pakyok\|lnw-wuachon` |
+| REST | **ไม่มี** — เป็นงานเก็บข้อมูลเปรียบเทียบล้วนๆ ไม่มี route สาธารณะ |
+| cadence | matches 60s · results 2m · standings 10m · analysis 15m · coverage 1h · pakyok 2m · wuachon 5m · boxing 15m |
+| ปิด/เปิดกีฬาต่อสู้ | `LNW_COMBAT` (default `boxing,muay_pakyok,wuachon`) ตั้งว่าง = ไม่ยิงเลย |
+
+**ห้ามให้มันเขียนทับ collection ของ thscore เด็ดขาด** (`matches`, `teams`, `leagues`,
+`standings`, `match_analysis`) ทุกอย่าง prefix `lnw_` — ถ้าสองเจ้าทับกันได้ การเปรียบเทียบก็
+ไม่มีความหมาย และการเลิกใช้ทำได้ด้วยการ drop 6 collection นี้ทิ้งเฉยๆ
+
+### เรื่องใหญ่ที่สุด: มันคือ aggregator ของ 4 ต้นน้ำที่ id ไม่ตรงกันเลย
+
+```
+/api/public/matches    id "rb_4344928"   โลโก้ logos1.tcpwe138stya.ru
+/api/public/results    id 19893334 int   โลโก้ cdn.sportmonks.com
+/api/public/standings  ไม่มี id เลย       โลโก้ 365scores (base64 ห่อใน /api/imgproxy)
+/api/analyse/*         id 342830 int     มี league/team/season id ชุดของตัวเอง
+```
+
+ต่างจาก thscore ที่ทุกอย่างแขวนบน match id เดียว **ที่นี่ join ด้วย key ไม่ได้ ต้องเดาจากชื่อทีม
++ เวลาแข่ง** → `internal/service/lnw_link.go` ทำ crosswalk เก็บลง `lnw_match_links` พร้อม
+`method` + `confidence` เสมอ **ห้ามเอา id ที่เดาได้ไปเขียนกลับลง document ของ feed**
+
+แถมชื่อทีมคนละภาษา **และปนกันในแถวเดียว** — นับจาก payload จริง 22 พ.ย. 2026:
+
+| feed | ไทยทั้งคู่ | ปนกัน (ข้างหนึ่งไทย ข้างหนึ่งละติน) | ละตินทั้งคู่ |
+|---|---|---|---|
+| `matches` (312 แถว) | 134 | **82** | 96 |
+| `results` (159 แถว) | 23 | 9 | **127** |
+| `analyse` (41 แถว) | 41 | 0 | 0 |
+
+(แถวจริง: home `"arezzo"` away `"ปาโดวา"`) → จับคู่ด้วยชื่อได้แค่เศษเสี้ยว ที่เหลือเหลือแค่เวลา
+กับสกอร์ `linkResultsByTime` + `linkRemainingByTime` ผูกให้เฉพาะตอนไม่กำกวม ถ้ากำกวม =
+ปล่อยไม่ผูก แล้วรายงานเหตุผลเป็นตัวเลขใน `lnw_coverage`
+
+### ตัวเลขจริงจากการรันกับ production (22 พ.ย. 2026 23:24 ICT)
+
+```
+day=2026-11-22  lnw_matches=251  thscore_matches=1197
+linked=60  (by_name=15  by_score=41  time_window=4)
+only_lnw=191  only_thscore=1137
+unlinked_ambiguous=190  unlinked_script=111  unlinked_no_candidate=1
+```
+
+**ผูกได้ 60 จาก 251 (24%) คือเพดานของสิ่งที่ทำได้ ไม่ใช่บั๊กของ matcher** — 190 แถวมีคู่แข่งขัน
+หลายคู่ในหน้าต่าง ±5 นาทีและสกอร์แยกไม่ออก (บอลเตะพร้อมกันเป็นสิบคู่) ส่วน 111 แถวชื่อเป็น
+ละตินตั้งแต่ต้นจึงไม่มีอะไรให้เทียบกับชื่อไทยของ thscore **เวลาอ่าน `linked` ต้องอ่าน
+`unlinked_*` ข้างๆ ด้วยเสมอ ไม่งั้นจะตีความว่า "สองเจ้าแทบไม่ซ้ำกัน" ซึ่งไม่จริง**
+
+coverage ของวันเดียวกันยังบอกด้วยว่า lnw มี **สตรีม 41 คู่** ที่ thscore ไม่มีเลย —
+นั่นคือสิ่งที่ซื้อมาจริงๆ ไม่ใช่จำนวนแมตช์
+
+### กับดักของ feed นี้ (โค้ดจัดการแล้ว อย่ารื้อ)
+
+1. **`/api/public/matches` ไม่มีวันที่** มีแค่ `day:"today"|"tomorrow"` + `time:"20:00"`
+   → ต้อง resolve ด้วยนาฬิกา ณ ตอน fetch (`lnw.ResolveKickoff`, `SyncMatches` จับเวลาไว้
+   ครั้งเดียวแล้วส่งต่อ) **เก็บดิบไว้แปลงทีหลัง = ผิดวัน** เก็บ `raw_day`/`raw_time` ไว้ตรวจย้อน
+2. **feed นี้ไม่มีประวัติย้อนหลัง** คืนแค่วันนี้+พรุ่งนี้ ย้อนหลังต้องไป `/api/public/results?date=`
+   ซึ่งเป็น id space คนละชุด
+3. **URL สตรีมมี token อายุสั้น** เอกสารเขาเขียนเอง "ห้ามแคชเกิน 15 วิ" → **ไม่เก็บลง Mongo**
+4. ⚠️ **`results.startingAt` เป็น UTC ไม่ใช่เวลาไทย** (แก้ 22 พ.ย. 2026) — ต่างจากทุก endpoint
+   ที่เหลือของเจ้านี้ พิสูจน์จาก endpoint ของเขาเองสองตัวที่พูดถึงคู่เดียวกัน: `results` บอก
+   `"2026-11-21 17:30:00"` ส่วน `analyse` บอก `"2026-11-22T00:30:00+07:00"` = ห่างกัน 7 ชม.
+   อ่านผิดเป็นเวลาไทย = ผลทุกคู่เลื่อน 7 ชม. และข้ามเส้น 04:00 ไปอยู่ผิดวัน
+   (`ParseResultTime` รับ `loc` มาแล้วทิ้ง จงใจ)
+   เก็บแค่รายชื่อช่อง (`model.LnwChannel` ไม่มีฟิลด์ URL)
+4. **สกอร์ก่อนแข่งเป็นสตริง `"vs"`** → `ParseScore` คืน `ok=false` ใช้ `HasScore` แยก 0-0 จริง
+   ออกจาก "ยังไม่เริ่ม" **ห้ามอ่านค่า 0 เปล่าๆ**
+5. **standings ไม่มี league id** ใช้ anchor จาก `leagueUrl` (`/standings#epl` → `epl`)
+   เป็น `_id` ถ้าไม่มี anchor = ข้ามทิ้ง ไม่ key ด้วยชื่อที่เขาเปลี่ยนคำได้
+6. **status คนละชุดกันทั้ง 3 feed** (`"30'"/"HT"/"รอแข่ง"` · `NS/INPLAY_1ST_HALF/FT_PEN` ·
+   `FULL_TIME`) → normalize แยกกัน 3 ฟังก์ชัน และเก็บค่าดิบไว้ทุกครั้ง
+
+> `match_date` ใช้เส้นตัด 04:00 ICT เดียวกับฝั่ง thscore (`MatchDateFor`) **จงใจ** เพื่อให้
+> นับเทียบกันวันต่อวันได้ตรงๆ
+
+### เอกสารของเขาขัดกันเอง — อย่าเชื่อ ให้ยึด `internal/lnw/client.go`
+
+ราคา: หน้า demo บอก Starter ฿500/สัปดาห์, Pro ฿3,500/เดือน · `llms.txt` บอก Starter
+฿4,500/เดือน, Pro ฿6,500/เดือน · rate limit: 10/min vs 60/min vs 1,000/min สำหรับ tier เดียวกัน
+
+**22 พ.ย. 2026 มีคีย์ Pro จริงแล้ว ยิง `-once lnw-verify` ตอบจาก account เอง:**
+`tier=pro` · `rate_limit_per_min=3000` (ตรงกับ header `x-rate-limit`) · `enforced=false` ·
+เปิดสิทธิ์ 25 กีฬา (รวม `boxing`, `muay_pakyok`, `wuachon`, `iptv`, `analysis`) ·
+หมดอายุ 22 ธ.ค. 2026 → **`LNW_RPS` default ขยับเป็น 2 (120/นาที = 4% ของเพดาน)**
+ไม่ดันเต็มเพดานเพราะ `enforced=false` แปลว่า "วันนี้ยังไม่นับ" ไม่ใช่ "นับไม่ได้"
+
+⚠️ **คีย์รายเดือนล็อกโดเมน/IP เองไม่ได้** (`canAccessPanel=false`, `allowedIps=[]`)
+`lnw-verify` จึง log `unlocked=true` ทุกครั้งที่ service start — ใครได้คีย์ไปยิงได้จากทุกที่
+ต้องขอผู้ขาย whitelist IP ของ VPS ให้
+
+⚠️ token ในช่อง playground หน้าเว็บ (ฟิลด์ `initialCsrf`) **ไม่ใช่ API key** — เป็น session token
+เซ็น HMAC มีวันหมดอายุ ใช้ทำ sync ไม่ได้ · ตอนประเมิน sandbox ของเขาเองก็ใช้งานไม่ได้
+
+### กีฬาต่อสู้ — ของที่ thscore ไม่มีเลย (เพิ่ม 22 พ.ย. 2026)
+
+นี่คือส่วนที่ "ซื้อแล้วได้อะไรเพิ่ม" จริงๆ ไม่ใช่จำนวนแมตช์ฟุตบอล
+
+| endpoint | ได้อะไร | สภาพจริง 22 พ.ย. 23:37 |
+|---|---|---|
+| `/api/public/boxing` | รายชื่อ "ศึก" 26 รายการ | **`totalEvents: 0` ทั้ง 26 — ยังไม่เคยเห็นคู่ชกสักคู่** |
+| `/api/public/muay-pakyok` | มวยพักยก | `data: []` ว่าง |
+| `/api/public/wuachon` | วัวชน + **ไก่ชน** | 212 คู่ (ไก่ 150 / วัว 62) ข้อมูลเต็ม |
+
+**`boxing.events[]` ยังไม่ type** จงใจ — เก็บเป็น `raw_events` ดิบไว้เฉยๆ และจะเก็บเฉพาะตอน
+ไม่ว่าง เพราะเขียน struct จากการเดาแล้วของจริงมาไม่ตรง = ข้อมูลหายเงียบๆ
+`SyncBoxing` log ระดับ **WARN** ทันทีที่เจอ card ครั้งแรก (ดูจาก `with_card` ใน log)
+`/api/public/boxing` **ไม่รับ parameter ใดๆ** ลอง `?date=` `?day=` `?programId=` ได้ของเดิมหมด
+รวมถึง `scrapedAt` เดียวกัน
+
+**กับดักของ feed นี้ (วัดจาก payload จริง อย่ารื้อ):**
+
+1. ⚠️ **URL สตรีมของ wuachon มี API key ฝังอยู่** — `stream.url` มี `stk=` ที่ decode base64
+   ออกมาเป็น `tgl-pro-<คีย์ของเรา>` → **ห้ามเก็บลง DB ห้ามส่งออก API เด็ดขาด** เก็บแค่
+   `has_stream` (bool) ยืนยันแล้วว่า document ที่เก็บจริงไม่มีทั้ง `stk=` และ `http`
+2. **`isLive` ขัดกับ `status`** — 200 จาก 212 คู่เป็น `status:"ended"` แต่ยังชู `isLive:true`
+   → **ยึด `status`** แต่เก็บ `is_live` ไว้ด้วย และนับความขัดแย้งออกมาเป็น
+   `live_contradicts_status` ใน log ทุกรอบ
+3. **`result` หลุดค่าดิบ `"green"`** มา 10 จาก 212 คู่ (`resultLabel` ก็เป็น `"green"` ด้วย)
+   → normalize เฉพาะ `red|blue|tie|""` ที่เหลือ `result_known:false` + เก็บ `raw_result`
+   **ห้ามแปล "green" เป็นภาษาไทยเอง** นั่นคือการกลบว่าเราไม่รู้
+4. **`stadiums[]` เดี๋ยวมีเดี๋ยวไม่มี** — fetch หนึ่งได้ 152 รายการ อีก 15 นาทีถัดมาได้ 0
+   → ใช้เป็น dictionary เสริมเท่านั้น ที่มาของสนามจริงคือ field `stadium` ในตัวคู่ชก
+5. **`roundName` ยัด 3 อย่างไว้ในสตริงเดียว** `"22/11/69 สนามชนไก่ดาวอังคาร คู่ที่ 33"`
+   (วันที่ พ.ศ. ย่อ + สนาม + ลำดับคู่) → `lnw.BoutNumber` ดึงเฉพาะ "คู่ที่ N" ออกมา
+   ที่เหลือเก็บ `raw_round_name` ไว้ทั้งดุ้น
+6. `wuachon` endpoint เสิร์ฟ **2 กีฬาในที่เดียว** (`type: "cock"` / `"wuachon"`)
+   → `_id` เป็น `<feed>:<id>` เพราะสอง feed เดินเลข id ของตัวเองแยกกัน
+7. payload ของ wuachon **~1.2 MB ต่อครั้ง** จึงตั้ง cadence 5 นาที ไม่ใช่ 1 นาที
+
+> `dateTime` ของ feed นี้ **ระบุ `+07:00` มาให้** ใช้ได้ตรงๆ (ต่างจาก `results.startingAt`
+> ที่เป็น UTC เปล่าๆ) แต่ `match_date` ยังคำนวณด้วยเส้น 04:00 ของเราเองเหมือนเดิม
+
 ## Repo ตัวอย่างสำหรับอ้างอิง (อยู่นอก repo นี้ ในเครื่อง dev)
 
 - Backend: `~/go/src/github.com/ChangPuakk/widgets` — production ที่ใช้ thscore จริง (หลาย provider; ของเรา thscore เจ้าเดียว ตัดชั้น mapping ทิ้ง)

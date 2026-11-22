@@ -90,6 +90,24 @@ type Config struct {
 	// markets it no longer feeds and flags none of them.
 	LottoStaleAfter time.Duration
 
+	// lnwthailive upstream, under evaluation against thscore. LnwAPIKey
+	// empty = the whole lnw subsystem is off: no sync loops, no routes,
+	// nothing written to the lnw_* collections. It is off by default on
+	// purpose — this feed is a candidate, not a dependency.
+	LnwBaseURL string
+	LnwAPIKey  string
+	// LnwRPS caps outbound calls. The vendor quotes 10/min, 60/min and
+	// 1,000/min for overlapping tiers across its own pages, so the default
+	// assumes the smallest until /api/portal/verify says otherwise.
+	LnwRPS float64
+	// LnwSports is which feeds to pull from /api/public/matches. Football
+	// alone is the comparison against thscore; the rest are the vendor's
+	// differentiator and cost quota to poll.
+	LnwSports []string
+	// LnwCombat is which of the vendor's own combat feeds to poll:
+	// boxing | muay_pakyok | wuachon. Empty disables them.
+	LnwCombat []string
+
 	// LogoDNSServer ("host:port") routes logo-CDN DNS lookups through a
 	// specific resolver — some ISPs (notably Thai ones) poison titan007.com
 	// at DNS level. Empty = system resolver.
@@ -127,7 +145,17 @@ func Load() (*Config, error) {
 		LottoRPS:           envFloat("LOTTO_RPS", 0.9),
 		LottoWebhookSecret: os.Getenv("LOTTO_WEBHOOK_SECRET"),
 		LottoStaleAfter:    envDuration("LOTTO_STALE_AFTER", 30*24*time.Hour),
+
+		LnwBaseURL: envStr("LNW_BASE_URL", "https://lnwthailive.online"),
+		LnwAPIKey:  os.Getenv("LNW_API_KEY"),
+		// 2 rps = 120/min against the 3,000/min the account actually grants
+		// (confirmed by -once lnw-verify, 2026-11-22). See lnw.New.
+		LnwRPS: envFloat("LNW_RPS", 2),
 	}
+	cfg.LnwSports = envCSV("LNW_SPORTS", []string{"football"})
+	// The vendor's own sports, which thscore has no equivalent of. On by
+	// default: they are the reason this feed is being evaluated at all.
+	cfg.LnwCombat = envCSV("LNW_COMBAT", []string{"boxing", "muay_pakyok", "wuachon"})
 	cfg.WSAllowedOrigins = envOriginList("WS_ALLOWED_ORIGINS")
 	cfg.WSTokenSecret = os.Getenv("WS_TOKEN_SECRET")
 	cfg.WSMaxConnsPerIP = envInt("WS_MAX_CONNS_PER_IP", 8)
@@ -250,4 +278,24 @@ func envDuration(key string, def time.Duration) time.Duration {
 		}
 	}
 	return def
+}
+
+// envCSV reads a comma-separated list, trimming blanks. An unset or empty
+// variable yields def rather than an empty list, so a typo cannot silently
+// disable a feed.
+func envCSV(key string, def []string) []string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return def
+	}
+	return out
 }
