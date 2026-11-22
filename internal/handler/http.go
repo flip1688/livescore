@@ -24,7 +24,8 @@ type Handler struct {
 
 	// boxing is nil unless the lnwthailive feed is configured; its routes
 	// are then simply not registered.
-	boxing *service.BoxingCatalog
+	boxing     *service.BoxingCatalog
+	basketball *service.BasketballCatalog
 }
 
 // Option customizes a Handler at construction.
@@ -68,6 +69,9 @@ func (h *Handler) Routes() http.Handler {
 	}
 	if h.boxing != nil {
 		h.boxingRoutes(mux)
+	}
+	if h.basketball != nil {
+		h.basketballRoutes(mux)
 	}
 	return corsMiddleware(h.corsAllowedOrigins, mux)
 }

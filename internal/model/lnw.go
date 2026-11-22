@@ -21,6 +21,10 @@ const (
 	// and MMA alike — the discipline, where it can be told at all, has to
 	// be read out of the programme title.
 	LnwSportFighting = "fighting"
+	// LnwSportBasketball is upstream's basketball feed: the same row shape
+	// as football, with teams, logos and a live score, but a status field
+	// that counts quarters instead of minutes.
+	LnwSportBasketball = "basketball"
 )
 
 // LnwMatch is one row of /api/public/matches: today's and tomorrow's

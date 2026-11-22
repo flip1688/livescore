@@ -163,3 +163,21 @@ func TestMapLnwStandingNeedsAnchor(t *testing.T) {
 		t.Error("table without an anchor must be skipped")
 	}
 }
+
+func TestMatchStatusFromBasketball(t *testing.T) {
+	// The basketball feed shares the fixture endpoint but not its
+	// vocabulary. Real labels seen on 2026-11-23.
+	cases := map[string]model.MatchStatus{
+		"จบเกม":  model.MatchFinished,
+		"Q1":     model.MatchLive,
+		"Q2":     model.MatchLive,
+		"OT":     model.MatchLive,
+		"HT":     model.MatchHalftime,
+		"รอแข่ง": model.MatchScheduled,
+	}
+	for raw, want := range cases {
+		if got := matchStatusFrom(raw, false); got != want {
+			t.Errorf("matchStatusFrom(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}

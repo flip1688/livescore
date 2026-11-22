@@ -18,7 +18,8 @@ import (
 // matchStatusFrom normalizes the fixture feed's status field, which mixes a
 // Thai word, a period abbreviation and an elapsed minute in one string.
 func matchStatusFrom(raw string, isLive bool) model.MatchStatus {
-	switch strings.ToUpper(strings.TrimSpace(raw)) {
+	trimmed := strings.TrimSpace(raw)
+	switch strings.ToUpper(trimmed) {
 	case "FT", "AET", "PEN":
 		return model.MatchFinished
 	case "HT":
@@ -28,12 +29,34 @@ func matchStatusFrom(raw string, isLive bool) model.MatchStatus {
 	case "CANC", "CANCELLED", "CANCELED":
 		return model.MatchCanceled
 	}
+	// The basketball feed speaks a different vocabulary through the same
+	// field: quarters rather than minutes, and a Thai word for full time.
+	// Without these, 42 of 121 basketball fixtures on 2026-11-23 — every
+	// finished one — fell through to "scheduled" and the page would have
+	// shown games that ended hours ago as not yet started.
+	if trimmed == "จบเกม" {
+		return model.MatchFinished
+	}
+	if isQuarterLabel(trimmed) {
+		return model.MatchLive
+	}
 	if strings.Contains(raw, "'") || isLive {
 		return model.MatchLive
 	}
 	// "รอแข่ง" and anything else unrecognised: upstream has not started the
 	// match, so scheduled is the safe reading.
 	return model.MatchScheduled
+}
+
+// isQuarterLabel reports whether a status is a basketball period: Q1..Q4
+// as upstream writes them, and OT / OT2 for overtime.
+func isQuarterLabel(s string) bool {
+	u := strings.ToUpper(s)
+	switch u {
+	case "Q1", "Q2", "Q3", "Q4", "OT", "OT2", "OT3":
+		return true
+	}
+	return false
 }
 
 // resultStateFrom normalizes the results feed's state codes. These are
