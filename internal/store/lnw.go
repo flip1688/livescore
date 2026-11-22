@@ -26,6 +26,8 @@ const (
 	collLnwAnalysis = "lnw_analysis"
 	collLnwLinks    = "lnw_match_links"
 	collLnwCoverage = "lnw_coverage"
+	collLnwBoxing   = "lnw_boxing_programs"
+	collLnwCombat   = "lnw_combat_bouts"
 )
 
 // lnwRetentionDays bounds the evaluation data. The feed carries only today
@@ -68,6 +70,26 @@ func (s *Store) EnsureLnwIndexes(ctx context.Context) error {
 		return err
 	}
 	if err := ensureTTLIndex(ctx, s.db.Collection(collLnwAnalysis), "updated_at", lnwRetentionDays); err != nil {
+		return err
+	}
+
+	// Boxing programmes are a small, slow-changing list and are kept
+	// without a TTL: the point of storing them is to notice the day a card
+	// finally appears, which needs the previous state to compare against.
+	if _, err := s.db.Collection(collLnwBoxing).Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "total_events", Value: -1}},
+	}); err != nil {
+		return err
+	}
+
+	if _, err := s.db.Collection(collLnwCombat).Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "sport", Value: 1}, {Key: "match_date", Value: -1}}},
+		{Keys: bson.D{{Key: "match_date", Value: -1}, {Key: "start_at", Value: 1}}},
+		{Keys: bson.D{{Key: "status", Value: 1}}},
+	}); err != nil {
+		return err
+	}
+	if err := ensureTTLIndex(ctx, s.db.Collection(collLnwCombat), "updated_at", lnwRetentionDays); err != nil {
 		return err
 	}
 
@@ -196,4 +218,16 @@ func (s *Store) CountMatchesByDate(ctx context.Context, day string) (int, int, e
 		return int(n), 0, err
 	}
 	return int(n), len(leagues), nil
+}
+
+// UpsertLnwBoxingPrograms replaces programmes by upstream id.
+func (s *Store) UpsertLnwBoxingPrograms(ctx context.Context, programs []model.LnwBoxingProgram) error {
+	return upsertByID(ctx, s.db.Collection(collLnwBoxing), programs,
+		func(p model.LnwBoxingProgram) string { return p.ID })
+}
+
+// UpsertLnwCombatBouts replaces bouts by sport-prefixed upstream id.
+func (s *Store) UpsertLnwCombatBouts(ctx context.Context, bouts []model.LnwCombatBout) error {
+	return upsertByID(ctx, s.db.Collection(collLnwCombat), bouts,
+		func(b model.LnwCombatBout) string { return b.ID })
 }

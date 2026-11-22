@@ -1,6 +1,7 @@
 package lnw
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -182,14 +183,67 @@ type AnalyseLeage struct {
 
 // KeyInfo is /api/portal/verify: what the account actually grants, as
 // opposed to what the pricing pages claim.
+//
+// Shape confirmed against a live Pro key on 2026-11-22, and it is not the
+// one the vendor's examples show: every field that matters is wrapped in
+// data, the expiry fields are epoch milliseconds rather than strings, and
+// the per-sport grants are called permissions, not allow.
 type KeyInfo struct {
-	OK        bool           `json:"ok"`
-	Tier      string         `json:"tier"`
-	Status    string         `json:"status"`
-	ExpiresAt string         `json:"expiresAt"`
-	DaysLeft  int            `json:"daysLeft"`
-	RateLimit int            `json:"rateLimit"`
-	Allow     map[string]any `json:"allow"`
+	OK   bool        `json:"ok"`
+	Data KeyInfoData `json:"data"`
+}
+
+type KeyInfoData struct {
+	MaskedKey string `json:"maskedKey"`
+	Label     string `json:"label"`
+	Owner     string `json:"owner"`
+	Tier      string `json:"tier"`
+	Status    string `json:"status"`
+	Active    bool   `json:"active"`
+	IsExpired bool   `json:"isExpired"`
+	IsSubKey  bool   `json:"isSubKey"`
+
+	// RateLimit is requests per minute. EnforceRateLimit false means the
+	// vendor is not counting yet — which is not a promise, so LNW_RPS stays
+	// well under the quoted ceiling either way.
+	RateLimit        int  `json:"rateLimit"`
+	EnforceRateLimit bool `json:"enforceRateLimit"`
+
+	// AllowedDomains/AllowedIPs empty means the key works from anywhere.
+	// Monthly keys cannot set these themselves (CanAccessPanel is false),
+	// so locking one down is a request to the vendor.
+	AccessPolicy   string   `json:"accessPolicy"`
+	AllowedDomains []string `json:"allowedDomains"`
+	AllowedIPs     []string `json:"allowedIps"`
+	CanAccessPanel bool     `json:"canAccessPanel"`
+
+	CreatedAt     int64 `json:"createdAt"` // epoch milliseconds
+	ExpiresAt     int64 `json:"expiresAt"` // epoch milliseconds
+	DaysRemaining int   `json:"daysRemaining"`
+
+	Permissions map[string]bool `json:"permissions"`
+}
+
+// ExpiresAtTime converts the epoch-millisecond expiry into a time. Zero
+// when upstream sent nothing.
+func (d KeyInfoData) ExpiresAtTime() time.Time {
+	if d.ExpiresAt == 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(d.ExpiresAt).UTC()
+}
+
+// Sports lists the sports this key may read, sorted so the verify output is
+// stable between runs.
+func (d KeyInfoData) Sports() []string {
+	out := make([]string, 0, len(d.Permissions))
+	for sport, allowed := range d.Permissions {
+		if allowed {
+			out = append(out, sport)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ParseScore reads upstream's "2 - 1" score string. ok is false before
@@ -269,11 +323,18 @@ func StandingKey(leagueURL string) string {
 	return strings.TrimSpace(leagueURL[i+1:])
 }
 
-// ParseResultTime reads /api/public/results' "2006-01-02 15:04:05". The
-// field carries no zone; it is read as Bangkok, consistent with every other
-// time this vendor publishes.
-func ParseResultTime(s string, loc *time.Location) (time.Time, bool) {
-	t, err := time.ParseInLocation("2006-01-02 15:04:05", strings.TrimSpace(s), loc)
+// ParseResultTime reads /api/public/results' "2006-01-02 15:04:05".
+//
+// The field carries no zone and it is NOT Bangkok, unlike every other time
+// this vendor publishes. Proof from two of its own endpoints describing one
+// fixture on 2026-11-22: /api/public/results gives Newcastle–Arsenal as
+// "2026-11-21 17:30:00" while /api/analyse gives the same fixture as
+// "2026-11-22T00:30:00+07:00" — seven hours apart, i.e. this one is UTC.
+//
+// loc is accepted and ignored so the caller still reads as though a zone
+// were a choice here; it is not.
+func ParseResultTime(s string, _ *time.Location) (time.Time, bool) {
+	t, err := time.ParseInLocation("2006-01-02 15:04:05", strings.TrimSpace(s), time.UTC)
 	if err != nil {
 		return time.Time{}, false
 	}

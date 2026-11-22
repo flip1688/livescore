@@ -67,6 +67,9 @@ const (
 	pathStandings = "/api/public/standings"
 	pathAnalyse   = "/api/analyse"
 	pathVerify    = "/api/portal/verify"
+	pathBoxing    = "/api/public/boxing"
+	pathPakyok    = "/api/public/muay-pakyok"
+	pathWuachon   = "/api/public/wuachon"
 )
 
 // Client is a rate-limited reader for the lnwthailive API.
@@ -77,13 +80,21 @@ type Client struct {
 	limiter *rate.Limiter
 }
 
-// New builds a client paced below the plan's per-minute quota. rps <= 0
-// falls back deliberately low: the vendor quotes 10/min (demo page), 60/min
-// (demo page, Starter) and 1,000/min (llms.txt, Starter) for the same tier,
-// so until a real plan is confirmed in writing, assume the smallest.
+// New builds a client paced below the plan's per-minute quota.
+//
+// The vendor's own pages quote 10/min, 60/min and 1,000/min for the same
+// tier, so the default used to assume the smallest. A purchased Pro key
+// answers the question itself: /api/portal/verify reports 3,000/min, and
+// the x-rate-limit response header agrees (measured 2026-11-22). The
+// default below is 4% of that — enough that no loop ever waits on the
+// limiter, low enough that a wrong reading cannot get the key banned.
+//
+// It is deliberately not raised to the ceiling: the same response says
+// enforceRateLimit is false, i.e. the vendor is not counting yet, which is
+// a statement about today rather than a promise.
 func New(baseURL, apiKey string, rps float64) *Client {
 	if rps <= 0 {
-		rps = 0.13 // ~8 req/min, inside even the 10/min demo quota
+		rps = 2 // 120 req/min against a measured 3,000/min ceiling
 	}
 	return &Client{
 		baseURL: baseURL,
@@ -224,4 +235,21 @@ func (c *Client) FetchAnalyseList(ctx context.Context, typ string, page, pageSiz
 // account itself (tier, expiry, rate limit, per-sport permissions).
 func (c *Client) VerifyKey(ctx context.Context) (KeyInfo, error) {
 	return decode[KeyInfo](ctx, c, pathVerify, nil)
+}
+
+// FetchBoxing returns the Thai boxing programmes. The endpoint takes no
+// parameters — date, day and programId were all tried on 2026-11-22 and
+// every one returned the same snapshot, down to scrapedAt.
+func (c *Client) FetchBoxing(ctx context.Context) (BoxingResponse, error) {
+	return decode[BoxingResponse](ctx, c, pathBoxing, nil)
+}
+
+// FetchCombat returns one combat feed. sport is SportPakyok or
+// SportWuachon; the wuachon feed carries both bull and cock fighting.
+func (c *Client) FetchCombat(ctx context.Context, sport string) (CombatResponse, error) {
+	path := pathWuachon
+	if sport == SportPakyok {
+		path = pathPakyok
+	}
+	return decode[CombatResponse](ctx, c, path, nil)
 }

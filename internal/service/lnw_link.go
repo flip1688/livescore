@@ -27,6 +27,27 @@ import (
 // of a few minutes is normal; beyond this they are different matches.
 const linkWindow = 90 * time.Minute
 
+// scoreWindow is the tighter tolerance used once names are out of the
+// picture. At 90 minutes almost every fixture of the day is a candidate;
+// at five, kick-off is discriminating enough to be worth something.
+const scoreWindow = 5 * time.Minute
+
+// hasThai reports whether a name is written in Thai at all.
+//
+// The fixture feed mixes scripts inside a single row — one fixture on
+// 2026-11-22 read home "arezzo", away "ปาโดวา" — and thscore names every
+// team in Thai. A Latin name therefore has nothing to be compared against,
+// which is a different kind of failure from "compared and disagreed" and
+// is counted separately.
+func hasThai(s string) bool {
+	for _, r := range s {
+		if r >= 0x0E00 && r <= 0x0E7F {
+			return true
+		}
+	}
+	return false
+}
+
 // normalizeTeam reduces a team name to something comparable across feeds:
 // case-folded, punctuation and spacing removed, and the club-type words
 // that one feed includes and another omits stripped.
@@ -83,7 +104,12 @@ func (s *LnwSyncer) SyncCoverage(ctx context.Context) error {
 		s.log.Info("lnw coverage computed",
 			"day", day,
 			"lnw_matches", cov.LnwMatches, "thscore_matches", cov.ThscoreMatches,
-			"linked", cov.Linked, "only_lnw", cov.OnlyLnw, "only_thscore", cov.OnlyThscore,
+			"linked", cov.Linked, "by_name", cov.LinkedByName,
+			"by_score", cov.LinkedByScore, "fuzzy", cov.LinkedFuzzy,
+			"only_lnw", cov.OnlyLnw, "only_thscore", cov.OnlyThscore,
+			"unlinked_script", cov.UnlinkedScript,
+			"unlinked_ambiguous", cov.UnlinkedAmbiguous,
+			"unlinked_no_candidate", cov.UnlinkedNoCandidate,
 			"lnw_results", cov.LnwResults, "with_stream", cov.LnwWithStream)
 	}
 	return nil
@@ -183,6 +209,11 @@ func (s *LnwSyncer) computeCoverage(ctx context.Context, day string) (model.LnwC
 		l.Confidence = 1
 	}
 
+	// Everything still unlinked has failed on names. Kick-off time and the
+	// score are the only signals left, and they are weak enough that this
+	// pass refuses far more often than it links — by design.
+	linkRemainingByTime(lnwMatches, thMatches, byKey, day, now, &cov)
+
 	// The result feed names teams in English while everything else is in
 	// Thai, so there is no name to match on. The only remaining signal is
 	// kick-off time, and it is only trustworthy when exactly one candidate
@@ -200,12 +231,129 @@ func (s *LnwSyncer) computeCoverage(ctx context.Context, day string) (model.LnwC
 		case l.ThscoreID != "":
 			cov.OnlyThscore++
 		}
-		if l.Method == model.LnwLinkTimeWindow || l.Method == model.LnwLinkFuzzyName {
+		switch l.Method {
+		case model.LnwLinkTimeWindow, model.LnwLinkTimeScore, model.LnwLinkFuzzyName:
 			cov.LinkedFuzzy++
 		}
 	}
 	sort.Slice(links, func(i, j int) bool { return links[i].ID < links[j].ID })
 	return cov, links, nil
+}
+
+// linkRemainingByTime links fixtures that no name comparison could reach.
+//
+// It runs after the name passes and considers only lnw rows that still have
+// no thscore id. A candidate must kick off within scoreWindow; when several
+// do, an identical score breaks the tie, and when that too is ambiguous the
+// pairing is left unmade and counted in cov.UnlinkedAmbiguous.
+//
+// Measured against production data on 2026-11-22 this resolves about one
+// fixture in seven. That is the ceiling of what is available without a
+// shared key, not a tuning problem: 212 of 312 fixtures had more than one
+// candidate at five minutes and no score to separate them.
+func linkRemainingByTime(
+	lnwMatches []model.LnwMatch,
+	thMatches []model.Match,
+	byKey map[string]*model.LnwMatchLink,
+	day string,
+	now time.Time,
+	cov *model.LnwCoverage,
+) {
+	// A thscore match already paired with a fixture must not be claimed
+	// again. Only a row carrying both ids counts as paired: the name pass
+	// also creates a row per unmatched thscore fixture, and treating those
+	// as taken would empty the candidate pool entirely.
+	taken := map[string]bool{}
+	// Where a thscore fixture is still on its own, remember the key of that
+	// row so a link made here can retire it — otherwise the same fixture is
+	// counted once as linked and once as thscore-only.
+	soloKey := map[string]string{}
+	for key, l := range byKey {
+		switch {
+		case l.ThscoreID != "" && l.MatchID != "":
+			taken[l.ThscoreID] = true
+		case l.ThscoreID != "":
+			soloKey[l.ThscoreID] = key
+		}
+	}
+
+	for _, m := range lnwMatches {
+		id := linkID(day, m.HomeName, m.AwayName)
+		l, ok := byKey[id]
+		if !ok || l.ThscoreID != "" {
+			continue
+		}
+
+		var candidates []model.Match
+		for _, th := range thMatches {
+			if taken[th.ID] {
+				continue
+			}
+			if absDuration(th.KickoffAt.Sub(m.KickoffAt)) <= scoreWindow {
+				candidates = append(candidates, th)
+			}
+		}
+
+		switch {
+		case len(candidates) == 0:
+			cov.UnlinkedNoCandidate++
+			if !hasThai(m.HomeName) || !hasThai(m.AwayName) {
+				cov.UnlinkedScript++
+			}
+			continue
+		case len(candidates) == 1:
+			attach(l, candidates[0].ID, model.LnwLinkTimeWindow, 0.5, now, taken)
+			retire(byKey, soloKey, candidates[0].ID)
+			continue
+		}
+
+		// Several candidates: the score separates them only when the match
+		// has one, which before kick-off it does not.
+		if m.HasScore {
+			var hit []model.Match
+			for _, th := range candidates {
+				if th.HomeScore == m.HomeScore && th.AwayScore == m.AwayScore {
+					hit = append(hit, th)
+				}
+			}
+			if len(hit) == 1 {
+				attach(l, hit[0].ID, model.LnwLinkTimeScore, 0.6, now, taken)
+				retire(byKey, soloKey, hit[0].ID)
+				cov.LinkedByScore++
+				continue
+			}
+		}
+
+		cov.UnlinkedAmbiguous++
+		if !hasThai(m.HomeName) || !hasThai(m.AwayName) {
+			cov.UnlinkedScript++
+		}
+	}
+}
+
+// attach records an inferred link and retires the thscore match from the
+// candidate pool so no second fixture can claim it.
+func attach(
+	l *model.LnwMatchLink,
+	thscoreID, method string,
+	confidence float64,
+	now time.Time,
+	taken map[string]bool,
+) {
+	l.ThscoreID = thscoreID
+	l.Method = method
+	l.Confidence = confidence
+	l.UpdatedAt = now
+	taken[thscoreID] = true
+}
+
+// retire drops the standalone row a thscore fixture had before it was
+// paired with a fixture from this vendor, so the day's totals still add up.
+func retire(byKey map[string]*model.LnwMatchLink, soloKey map[string]string, thscoreID string) {
+	if key, ok := soloKey[thscoreID]; ok {
+		delete(byKey, key)
+		delete(soloKey, thscoreID)
+	}
 }
 
 // linkResultsByTime attaches result rows to fixture rows on kick-off alone,

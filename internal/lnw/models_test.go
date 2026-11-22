@@ -104,9 +104,16 @@ func TestStandingKey(t *testing.T) {
 }
 
 func TestParseResultTime(t *testing.T) {
+	// This endpoint publishes UTC while the rest of the vendor publishes
+	// Bangkok, so the zone argument must not be able to change the answer:
+	// reading it as local would move every result seven hours and, across
+	// the 04:00 cutoff, onto the wrong matchday.
 	got, ok := ParseResultTime("2026-11-18 18:00:00", bkk)
-	if !ok || !got.Equal(time.Date(2026, 11, 18, 18, 0, 0, 0, bkk)) {
+	if !ok || !got.Equal(time.Date(2026, 11, 18, 18, 0, 0, 0, time.UTC)) {
 		t.Fatalf("ParseResultTime = %v,%v", got, ok)
+	}
+	if got.In(bkk).Hour() != 1 {
+		t.Errorf("18:00 UTC should read as 01:00 Bangkok, got %v", got.In(bkk))
 	}
 	if _, ok := ParseResultTime("2026-11-18T18:00:00Z", bkk); ok {
 		t.Error("RFC3339 is not this endpoint's format; want not ok")

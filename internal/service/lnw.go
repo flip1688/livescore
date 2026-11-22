@@ -28,13 +28,29 @@ type LnwSyncer struct {
 	// the comparison that matters; the others are the vendor's differentiator
 	// and are only worth polling once we know a key is allowed to read them.
 	sports []string
+
+	// combat is which of the vendor's own sports to poll: boxing
+	// programmes, the pakyok feed and the wuachon feed. Empty disables
+	// them, which is the right setting while only the football comparison
+	// is being looked at.
+	combat []string
 }
 
-func NewLnwSyncer(c *lnw.Client, st *store.Store, log *slog.Logger, sports []string) *LnwSyncer {
+func NewLnwSyncer(c *lnw.Client, st *store.Store, log *slog.Logger, sports, combat []string) *LnwSyncer {
 	if len(sports) == 0 {
 		sports = []string{model.LnwSportFootball}
 	}
-	return &LnwSyncer{client: c, store: st, log: log, sports: sports}
+	return &LnwSyncer{client: c, store: st, log: log, sports: sports, combat: combat}
+}
+
+// wantsCombat reports whether a combat feed is enabled.
+func (s *LnwSyncer) wantsCombat(sport string) bool {
+	for _, c := range s.combat {
+		if c == sport {
+			return true
+		}
+	}
+	return false
 }
 
 // Run starts the evaluation loops and blocks until ctx is canceled.
@@ -52,10 +68,7 @@ func (s *LnwSyncer) Run(ctx context.Context) {
 	if info, err := s.client.VerifyKey(ctx); err != nil {
 		s.log.Error("lnw key verify failed", "err", err)
 	} else {
-		s.log.Info("lnw key verified",
-			"tier", info.Tier, "status", info.Status,
-			"expires_at", info.ExpiresAt, "days_left", info.DaysLeft,
-			"rate_limit", info.RateLimit)
+		s.logKeyInfo(info)
 	}
 
 	go s.loop(ctx, "lnw-matches", time.Minute, s.SyncMatches)
@@ -64,6 +77,25 @@ func (s *LnwSyncer) Run(ctx context.Context) {
 	go s.loop(ctx, "lnw-analysis", 15*time.Minute, s.SyncAnalysis)
 	// Coverage reads only what the loops above have already stored, so it
 	// costs no upstream calls and can run often enough to be useful.
+	// The combat feeds. Pakyok is small and changes fast; wuachon answers
+	// with well over a megabyte per fetch, so it is polled more slowly than
+	// its liveness would otherwise justify; boxing is a list of promotions
+	// that barely changes, and is polled mainly to catch the day a card
+	// finally appears.
+	if s.wantsCombat(lnw.SportBoxing) {
+		go s.loop(ctx, "lnw-boxing", 15*time.Minute, s.SyncBoxing)
+	}
+	if s.wantsCombat(lnw.SportPakyok) {
+		go s.loop(ctx, "lnw-pakyok", 2*time.Minute, func(ctx context.Context) error {
+			return s.SyncCombat(ctx, lnw.SportPakyok)
+		})
+	}
+	if s.wantsCombat(lnw.SportWuachon) {
+		go s.loop(ctx, "lnw-wuachon", 5*time.Minute, func(ctx context.Context) error {
+			return s.SyncCombat(ctx, lnw.SportWuachon)
+		})
+	}
+
 	go s.loop(ctx, "lnw-coverage", time.Hour, s.SyncCoverage)
 	<-ctx.Done()
 }
@@ -100,18 +132,39 @@ func (s *LnwSyncer) RunOnce(ctx context.Context, job string) error {
 		return s.SyncAnalysis(ctx)
 	case "lnw-coverage":
 		return s.SyncCoverage(ctx)
+	case "lnw-boxing":
+		return s.SyncBoxing(ctx)
+	case "lnw-pakyok":
+		return s.SyncCombat(ctx, lnw.SportPakyok)
+	case "lnw-wuachon":
+		return s.SyncCombat(ctx, lnw.SportWuachon)
 	case "lnw-verify":
 		info, err := s.client.VerifyKey(ctx)
 		if err != nil {
 			return err
 		}
-		s.log.Info("lnw key verified",
-			"tier", info.Tier, "status", info.Status,
-			"expires_at", info.ExpiresAt, "days_left", info.DaysLeft,
-			"rate_limit", info.RateLimit, "allow", info.Allow)
+		s.logKeyInfo(info)
 		return nil
 	}
 	return nil
+}
+
+// logKeyInfo prints everything /api/portal/verify knows about the key.
+//
+// unlocked is the fact worth seeing on every start: a key with no domain
+// and no IP allow-list works from anywhere, which for a monthly key is not
+// something we can fix ourselves (CanAccessPanel is false — the vendor has
+// to set it).
+func (s *LnwSyncer) logKeyInfo(info lnw.KeyInfo) {
+	d := info.Data
+	s.log.Info("lnw key verified",
+		"key", d.MaskedKey, "label", d.Label, "tier", d.Tier,
+		"status", d.Status, "active", d.Active, "expired", d.IsExpired,
+		"expires_at", d.ExpiresAtTime().Format(time.RFC3339),
+		"days_left", d.DaysRemaining,
+		"rate_limit_per_min", d.RateLimit, "rate_limit_enforced", d.EnforceRateLimit,
+		"sports", d.Sports(),
+		"unlocked", len(d.AllowedDomains) == 0 && len(d.AllowedIPs) == 0)
 }
 
 // SyncMatches refreshes today's and tomorrow's fixtures for every

@@ -104,6 +104,9 @@ type Config struct {
 	// alone is the comparison against thscore; the rest are the vendor's
 	// differentiator and cost quota to poll.
 	LnwSports []string
+	// LnwCombat is which of the vendor's own combat feeds to poll:
+	// boxing | muay_pakyok | wuachon. Empty disables them.
+	LnwCombat []string
 
 	// LogoDNSServer ("host:port") routes logo-CDN DNS lookups through a
 	// specific resolver — some ISPs (notably Thai ones) poison titan007.com
@@ -145,9 +148,14 @@ func Load() (*Config, error) {
 
 		LnwBaseURL: envStr("LNW_BASE_URL", "https://lnwthailive.online"),
 		LnwAPIKey:  os.Getenv("LNW_API_KEY"),
-		LnwRPS:     envFloat("LNW_RPS", 0.13),
+		// 2 rps = 120/min against the 3,000/min the account actually grants
+		// (confirmed by -once lnw-verify, 2026-11-22). See lnw.New.
+		LnwRPS: envFloat("LNW_RPS", 2),
 	}
 	cfg.LnwSports = envCSV("LNW_SPORTS", []string{"football"})
+	// The vendor's own sports, which thscore has no equivalent of. On by
+	// default: they are the reason this feed is being evaluated at all.
+	cfg.LnwCombat = envCSV("LNW_COMBAT", []string{"boxing", "muay_pakyok", "wuachon"})
 	cfg.WSAllowedOrigins = envOriginList("WS_ALLOWED_ORIGINS")
 	cfg.WSTokenSecret = os.Getenv("WS_TOKEN_SECRET")
 	cfg.WSMaxConnsPerIP = envInt("WS_MAX_CONNS_PER_IP", 8)

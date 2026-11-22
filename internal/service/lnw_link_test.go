@@ -90,3 +90,98 @@ func TestLinkIDIsFeedAgnostic(t *testing.T) {
 		t.Error("home/away order must be significant")
 	}
 }
+
+func TestHasThaiSeparatesComparableNames(t *testing.T) {
+	if !hasThai("ปาโดวา") {
+		t.Error("Thai name not recognized")
+	}
+	// Real row from 2026-11-22: the vendor mixes scripts inside one fixture.
+	if hasThai("arezzo") {
+		t.Error("Latin name must not count as Thai")
+	}
+}
+
+func TestLinkRemainingByTimeRefusesToGuess(t *testing.T) {
+	day := "2026-11-22"
+	base := time.Date(2026, 11, 22, 20, 0, 0, 0, time.UTC)
+
+	// A Latin-named fixture: no name comparison with thscore is possible,
+	// so this pass is its only chance of being linked.
+	m := model.LnwMatch{
+		ID: "rb_1", HomeName: "arezzo", AwayName: "ปาโดวา",
+		KickoffAt: base, HasScore: true, HomeScore: 2, AwayScore: 1,
+	}
+	key := linkID(day, m.HomeName, m.AwayName)
+	newIndex := func() map[string]*model.LnwMatchLink {
+		return map[string]*model.LnwMatchLink{
+			key: {ID: key, MatchDate: day, MatchID: "rb_1"},
+		}
+	}
+
+	// One candidate in the window: linked, but only at time-window
+	// confidence — nothing here proves it is the same fixture.
+	idx := newIndex()
+	var cov model.LnwCoverage
+	linkRemainingByTime(
+		[]model.LnwMatch{m},
+		[]model.Match{{ID: "th_1", KickoffAt: base.Add(2 * time.Minute)}},
+		idx, day, base, &cov,
+	)
+	if got := idx[key].ThscoreID; got != "th_1" {
+		t.Fatalf("unique candidate not linked: %q", got)
+	}
+	if idx[key].Method != model.LnwLinkTimeWindow || idx[key].Confidence != 0.5 {
+		t.Errorf("link advertised too strongly: %s/%v", idx[key].Method, idx[key].Confidence)
+	}
+
+	// Two candidates, one of which has the same score: the score breaks the
+	// tie and the link says so.
+	idx = newIndex()
+	cov = model.LnwCoverage{}
+	linkRemainingByTime(
+		[]model.LnwMatch{m},
+		[]model.Match{
+			{ID: "th_1", KickoffAt: base, HomeScore: 0, AwayScore: 0},
+			{ID: "th_2", KickoffAt: base, HomeScore: 2, AwayScore: 1},
+		},
+		idx, day, base, &cov,
+	)
+	if idx[key].ThscoreID != "th_2" || idx[key].Method != model.LnwLinkTimeScore {
+		t.Errorf("score tie-break failed: %+v", idx[key])
+	}
+	if cov.LinkedByScore != 1 {
+		t.Errorf("LinkedByScore = %d, want 1", cov.LinkedByScore)
+	}
+
+	// Two candidates with the same score as each other: unresolvable, and
+	// the row must stay unlinked rather than pick one.
+	idx = newIndex()
+	cov = model.LnwCoverage{}
+	linkRemainingByTime(
+		[]model.LnwMatch{m},
+		[]model.Match{
+			{ID: "th_1", KickoffAt: base, HomeScore: 2, AwayScore: 1},
+			{ID: "th_2", KickoffAt: base, HomeScore: 2, AwayScore: 1},
+		},
+		idx, day, base, &cov,
+	)
+	if idx[key].ThscoreID != "" {
+		t.Error("ambiguous pairing was guessed")
+	}
+	if cov.UnlinkedAmbiguous != 1 || cov.UnlinkedScript != 1 {
+		t.Errorf("unlinked reason not recorded: ambiguous=%d script=%d",
+			cov.UnlinkedAmbiguous, cov.UnlinkedScript)
+	}
+
+	// Nothing in the window at all.
+	idx = newIndex()
+	cov = model.LnwCoverage{}
+	linkRemainingByTime(
+		[]model.LnwMatch{m},
+		[]model.Match{{ID: "th_1", KickoffAt: base.Add(time.Hour)}},
+		idx, day, base, &cov,
+	)
+	if idx[key].ThscoreID != "" || cov.UnlinkedNoCandidate != 1 {
+		t.Errorf("out-of-window candidate was used: %+v", idx[key])
+	}
+}

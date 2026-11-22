@@ -216,6 +216,7 @@ const (
 	LnwLinkAliasName  = "alias_name"  // matched through a known alias
 	LnwLinkFuzzyName  = "fuzzy_name"  // similarity above threshold
 	LnwLinkTimeWindow = "time_window" // only one candidate in the window
+	LnwLinkTimeScore  = "time_score"  // kick-off window plus an identical score
 )
 
 // LnwCoverage is one day's comparison between this vendor and thscore.
@@ -235,11 +236,22 @@ type LnwCoverage struct {
 
 	// Linked counts matches present in both feeds; OnlyLnw and OnlyThscore
 	// are what each vendor would have cost us had we used only the other.
-	Linked       int `bson:"linked" json:"linked"`
-	OnlyLnw      int `bson:"only_lnw" json:"only_lnw"`
-	OnlyThscore  int `bson:"only_thscore" json:"only_thscore"`
-	LinkedByName int `bson:"linked_by_name" json:"linked_by_name"`
-	LinkedFuzzy  int `bson:"linked_fuzzy" json:"linked_fuzzy"`
+	Linked        int `bson:"linked" json:"linked"`
+	OnlyLnw       int `bson:"only_lnw" json:"only_lnw"`
+	OnlyThscore   int `bson:"only_thscore" json:"only_thscore"`
+	LinkedByName  int `bson:"linked_by_name" json:"linked_by_name"`
+	LinkedFuzzy   int `bson:"linked_fuzzy" json:"linked_fuzzy"`
+	LinkedByScore int `bson:"linked_by_score" json:"linked_by_score"`
+
+	// Why the remaining fixtures could not be linked. These are a property
+	// of the vendor rather than of the matcher: measured on 2026-11-22,
+	// 231 of 312 lnw fixtures named their league differently from thscore
+	// and most named at least one team in Latin script while thscore names
+	// it in Thai, so for those rows no name comparison exists to make.
+	// A low Linked count must be read with these three beside it.
+	UnlinkedScript      int `bson:"unlinked_script" json:"unlinked_script"`
+	UnlinkedAmbiguous   int `bson:"unlinked_ambiguous" json:"unlinked_ambiguous"`
+	UnlinkedNoCandidate int `bson:"unlinked_no_candidate" json:"unlinked_no_candidate"`
 
 	ComputedAt time.Time `bson:"computed_at" json:"computed_at"`
 }

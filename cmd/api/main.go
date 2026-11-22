@@ -28,7 +28,7 @@ import (
 )
 
 func main() {
-	once := flag.String("once", "", "run a single sync job (dictionary|logos|schedule|schedule-ahead|schedule-modify|live-snapshot|live-changes|events-stats|standings|analysis|lotto-markets|lotto-results|lnw-verify|lnw-matches|lnw-results|lnw-standings|lnw-analysis|lnw-coverage) and exit")
+	once := flag.String("once", "", "run a single sync job (dictionary|logos|schedule|schedule-ahead|schedule-modify|live-snapshot|live-changes|events-stats|standings|analysis|lotto-markets|lotto-results|lnw-verify|lnw-matches|lnw-results|lnw-standings|lnw-analysis|lnw-coverage|lnw-boxing|lnw-pakyok|lnw-wuachon) and exit")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -107,7 +107,7 @@ func run(log *slog.Logger, once string) error {
 	if cfg.LnwAPIKey != "" {
 		lnwSync = service.NewLnwSyncer(
 			lnw.New(cfg.LnwBaseURL, cfg.LnwAPIKey, cfg.LnwRPS),
-			st, log, cfg.LnwSports,
+			st, log, cfg.LnwSports, cfg.LnwCombat,
 		)
 	}
 
